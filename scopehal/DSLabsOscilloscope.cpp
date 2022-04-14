@@ -106,6 +106,14 @@ DSLabsOscilloscope::DSLabsOscilloscope(SCPITransport* transport)
 	SetSampleRate(1000000L);
 	SetSampleDepth(10000);
 
+	m_lastSeqnum = 0;
+	m_lastPopped = GetTime();
+	m_runningPopDelta = 0.1;
+	for (int i = 0; i < 10; i++)
+	{
+		m_popDeltas.push_back(m_runningPopDelta);
+	}
+
 	//Set up the data plane socket
 	auto csock = dynamic_cast<SCPITwinLanTransport*>(m_transport);
 	if(!csock)
@@ -255,13 +263,12 @@ Oscilloscope::TriggerMode DSLabsOscilloscope::PollTrigger()
 
 bool DSLabsOscilloscope::AcquireData()
 {
-	const uint8_t r = 'K';
-	m_transport->SendRawData(1, &r);
-
 	//Read the sequence number of the current waveform
-	uint32_t seqnum;
+	int64_t seqnum;
 	if(!m_transport->ReadRawData(sizeof(seqnum), (uint8_t*)&seqnum))
 		return false;
+
+	m_lastSeqnum = seqnum;
 
 	//Read the number of channels in the current waveform
 	uint16_t numChannels;
@@ -273,8 +280,6 @@ bool DSLabsOscilloscope::AcquireData()
 	int64_t fs_per_sample;
 	if(!m_transport->ReadRawData(sizeof(fs_per_sample), (uint8_t*)&fs_per_sample))
 		return false;
-
-	// LogDebug("Receive header: SEQ#%u, %d channels\n", seqnum, numChannels);
 
 	//Acquire data for each channel
 	size_t chnum;
@@ -434,6 +439,47 @@ bool DSLabsOscilloscope::AcquireData()
 		m_triggerArmed = false;
 
 	return true;
+}
+
+bool DSLabsOscilloscope::PopPendingWaveform()
+{
+	bool res = Oscilloscope::PopPendingWaveform();
+
+	double now = GetTime();
+	double newDelta = now - m_lastPopped;
+	m_lastPopped = now;
+
+	m_runningPopDelta -= m_popDeltas.front() / 10.;
+	m_runningPopDelta += newDelta / 10.;
+	m_popDeltas.pop_front();
+	m_popDeltas.push_back(newDelta);
+
+	m_pendingWaveformsMutex.lock();
+	int64_t pending = m_pendingWaveforms.size();
+	m_pendingWaveformsMutex.unlock();
+
+	int64_t newWindowSize = max(1., 0.1 / m_runningPopDelta);
+
+	LogDebug("DSL Acquisition rate: %f/s; acking=%d; window=%d\n", 1./m_runningPopDelta, (int)(m_lastSeqnum - pending + 1), (int)newWindowSize);
+
+	int64_t update[2] = {m_lastSeqnum - pending + 1, newWindowSize};
+
+	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
+
+	return res;
+}
+
+void DSLabsOscilloscope::ClearPendingWaveforms()
+{
+	Oscilloscope::ClearPendingWaveforms();
+
+	int64_t newWindowSize = max(1., 0.1 / m_runningPopDelta);
+
+	LogDebug("DSL Acquisition reset: %f/s; acking=%d; window=%d\n", 1./m_runningPopDelta, (int)(m_lastSeqnum), (int)newWindowSize);
+
+	int64_t update[2] = {m_lastSeqnum, newWindowSize};
+
+	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
 }
 
 vector<uint64_t> DSLabsOscilloscope::GetSampleRatesNonInterleaved()

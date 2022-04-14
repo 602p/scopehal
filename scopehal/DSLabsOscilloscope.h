@@ -32,6 +32,9 @@
 
 #include "RemoteBridgeOscilloscope.h"
 
+#include <atomic>
+#include <deque>
+
 /**
 	@brief DSLabsOscilloscope - driver for talking to the scopehal-dslabs-bridge daemons
  */
@@ -63,6 +66,8 @@ public:
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger();
 	virtual bool AcquireData();
+	virtual bool PopPendingWaveform();
+	virtual void ClearPendingWaveforms();
 
 	//Timebase
 	virtual std::vector<uint64_t> GetSampleRatesNonInterleaved();
@@ -109,6 +114,11 @@ protected:
 	size_t m_analogChannelCount;
 	size_t m_digitalChannelBase;
 	size_t m_digitalChannelCount;
+
+	std::atomic<int64_t> m_lastSeqnum;
+	double m_lastPopped;
+	std::deque<double> m_popDeltas;
+	double m_runningPopDelta;
 
 	//Most DSLabs API calls are write only, so we have to maintain all state clientside.
 	//This isn't strictly a cache anymore since it's never flushed!

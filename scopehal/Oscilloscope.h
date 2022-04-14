@@ -850,7 +850,7 @@ protected:
 
 public:
 	bool HasPendingWaveforms();
-	void ClearPendingWaveforms();
+	virtual void ClearPendingWaveforms();
 	size_t GetPendingWaveformCount();
 	virtual bool PopPendingWaveform();
 
