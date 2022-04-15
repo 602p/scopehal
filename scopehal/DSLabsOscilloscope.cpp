@@ -422,8 +422,16 @@ bool DSLabsOscilloscope::AcquireData()
 
 	//Save the waveforms to our queue
 	m_pendingWaveformsMutex.lock();
+	
+		
 	m_pendingWaveforms.push_back(s);
-	g_pendingWaveformTimestamps.push_back(timestamp);
+	m_pendingWaveformTimestamps.push_back(timestamp);
+	while (m_pendingWaveforms.size() > 2) {
+		// This is key.
+		printf(" [drop] "); fflush(stdout);
+		m_pendingWaveforms.pop_front();
+		m_pendingWaveformTimestamps.pop_front();
+	}
 	m_pendingWaveformsMutex.unlock();
 
 	//If this was a one-shot trigger we're no longer armed
@@ -440,8 +448,8 @@ bool DSLabsOscilloscope::PopPendingWaveform()
 	if (did_pop)
 	{
 		m_pendingWaveformsMutex.lock();
-		uint64_t to_ack = g_pendingWaveformTimestamps.front();
-		g_pendingWaveformTimestamps.pop_front();
+		uint64_t to_ack = m_pendingWaveformTimestamps.front();
+		m_pendingWaveformTimestamps.pop_front();
 		m_pendingWaveformsMutex.unlock();
 
 		AckToTimestamp(to_ack);
@@ -454,10 +462,10 @@ void DSLabsOscilloscope::ClearPendingWaveforms()
 {
 	uint64_t to_ack = UINT64_MAX;
 	m_pendingWaveformsMutex.lock();
-	if (g_pendingWaveformTimestamps.size())
+	if (m_pendingWaveformTimestamps.size())
 	{
-		to_ack = g_pendingWaveformTimestamps.back();
-		g_pendingWaveformTimestamps.clear();
+		to_ack = m_pendingWaveformTimestamps.back();
+		m_pendingWaveformTimestamps.clear();
 	}
 	m_pendingWaveformsMutex.unlock();
 
@@ -468,7 +476,10 @@ void DSLabsOscilloscope::ClearPendingWaveforms()
 
 void DSLabsOscilloscope::AckToTimestamp(uint64_t ms)
 {
-	uint64_t update[2] = {ms, 200};
+	// For some reason just sending a uint64_t yields errno=14
+	// LogDebug("ACKing to %d (+%d)\n", (int)ms, (int)(ms - m_lastAcked));
+	m_lastAcked = ms;
+	uint64_t update[2] = {ms, 0};
 	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
 }
 

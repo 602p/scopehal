@@ -115,7 +115,8 @@ protected:
 	size_t m_digitalChannelBase;
 	size_t m_digitalChannelCount;
 
-	std::deque<uint64_t> g_pendingWaveformTimestamps;
+	std::deque<uint64_t> m_pendingWaveformTimestamps;
+	uint64_t m_lastAcked;
 
 	//Most DSLabs API calls are write only, so we have to maintain all state clientside.
 	//This isn't strictly a cache anymore since it's never flushed!
