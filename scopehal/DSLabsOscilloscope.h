@@ -115,10 +115,7 @@ protected:
 	size_t m_digitalChannelBase;
 	size_t m_digitalChannelCount;
 
-	std::atomic<int64_t> m_lastSeqnum;
-	double m_lastPopped;
-	std::deque<double> m_popDeltas;
-	double m_runningPopDelta;
+	std::deque<uint64_t> g_pendingWaveformTimestamps;
 
 	//Most DSLabs API calls are write only, so we have to maintain all state clientside.
 	//This isn't strictly a cache anymore since it's never flushed!
@@ -127,10 +124,8 @@ protected:
 	// Only configurable for the entire device
 	float m_digitalThreshold;
 
-	void SendDataSocket(size_t n, const uint8_t* p);
-	bool ReadDataSocket(size_t n, uint8_t* p);
-
-	Socket* m_dataSocket;
+	uint64_t GetMSSinceEpoch();
+	void AckToTimestamp(uint64_t ms);
 
 	Series m_series;
 

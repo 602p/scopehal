@@ -27,8 +27,9 @@
 *                                                                                                                      *
 ***********************************************************************************************************************/
 
-#ifdef _WIN32
 #include <chrono>
+
+#ifdef _WIN32
 #include <thread>
 #endif
 
@@ -105,14 +106,6 @@ DSLabsOscilloscope::DSLabsOscilloscope(SCPITransport* transport)
 	//Set initial memory configuration.
 	SetSampleRate(1000000L);
 	SetSampleDepth(10000);
-
-	m_lastSeqnum = 0;
-	m_lastPopped = GetTime();
-	m_runningPopDelta = 0.1;
-	for (int i = 0; i < 10; i++)
-	{
-		m_popDeltas.push_back(m_runningPopDelta);
-	}
 
 	//Set up the data plane socket
 	auto csock = dynamic_cast<SCPITwinLanTransport*>(m_transport);
@@ -197,7 +190,7 @@ void DSLabsOscilloscope::IdentifyHardware()
 
 DSLabsOscilloscope::~DSLabsOscilloscope()
 {
-	delete m_dataSocket;
+	
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -263,12 +256,10 @@ Oscilloscope::TriggerMode DSLabsOscilloscope::PollTrigger()
 
 bool DSLabsOscilloscope::AcquireData()
 {
-	//Read the sequence number of the current waveform
-	int64_t seqnum;
-	if(!m_transport->ReadRawData(sizeof(seqnum), (uint8_t*)&seqnum))
+	// Read timestamp for flow-control
+	uint64_t timestamp;
+	if(!m_transport->ReadRawData(sizeof(timestamp), (uint8_t*)&timestamp))
 		return false;
-
-	m_lastSeqnum = seqnum;
 
 	//Read the number of channels in the current waveform
 	uint16_t numChannels;
@@ -432,6 +423,7 @@ bool DSLabsOscilloscope::AcquireData()
 	//Save the waveforms to our queue
 	m_pendingWaveformsMutex.lock();
 	m_pendingWaveforms.push_back(s);
+	g_pendingWaveformTimestamps.push_back(timestamp);
 	m_pendingWaveformsMutex.unlock();
 
 	//If this was a one-shot trigger we're no longer armed
@@ -443,42 +435,40 @@ bool DSLabsOscilloscope::AcquireData()
 
 bool DSLabsOscilloscope::PopPendingWaveform()
 {
-	bool res = Oscilloscope::PopPendingWaveform();
+	bool did_pop = Oscilloscope::PopPendingWaveform();
 
-	double now = GetTime();
-	double newDelta = now - m_lastPopped;
-	m_lastPopped = now;
+	if (did_pop)
+	{
+		m_pendingWaveformsMutex.lock();
+		uint64_t to_ack = g_pendingWaveformTimestamps.front();
+		g_pendingWaveformTimestamps.pop_front();
+		m_pendingWaveformsMutex.unlock();
 
-	m_runningPopDelta -= m_popDeltas.front() / 10.;
-	m_runningPopDelta += newDelta / 10.;
-	m_popDeltas.pop_front();
-	m_popDeltas.push_back(newDelta);
+		AckToTimestamp(to_ack);
+	}
 
-	m_pendingWaveformsMutex.lock();
-	int64_t pending = m_pendingWaveforms.size();
-	m_pendingWaveformsMutex.unlock();
-
-	int64_t newWindowSize = max(1., 0.1 / m_runningPopDelta);
-
-	LogDebug("DSL Acquisition rate: %f/s; acking=%d; window=%d\n", 1./m_runningPopDelta, (int)(m_lastSeqnum - pending + 1), (int)newWindowSize);
-
-	int64_t update[2] = {m_lastSeqnum - pending + 1, newWindowSize};
-
-	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
-
-	return res;
+	return did_pop;
 }
 
 void DSLabsOscilloscope::ClearPendingWaveforms()
 {
+	uint64_t to_ack = UINT64_MAX;
+	m_pendingWaveformsMutex.lock();
+	if (g_pendingWaveformTimestamps.size())
+	{
+		to_ack = g_pendingWaveformTimestamps.back();
+		g_pendingWaveformTimestamps.clear();
+	}
+	m_pendingWaveformsMutex.unlock();
+
 	Oscilloscope::ClearPendingWaveforms();
 
-	int64_t newWindowSize = max(1., 0.1 / m_runningPopDelta);
+	if (to_ack != UINT64_MAX) AckToTimestamp(to_ack);
+}
 
-	LogDebug("DSL Acquisition reset: %f/s; acking=%d; window=%d\n", 1./m_runningPopDelta, (int)(m_lastSeqnum), (int)newWindowSize);
-
-	int64_t update[2] = {m_lastSeqnum, newWindowSize};
-
+void DSLabsOscilloscope::AckToTimestamp(uint64_t ms)
+{
+	uint64_t update[2] = {ms, 200};
 	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
 }
 
@@ -688,4 +678,9 @@ void DSLabsOscilloscope::SetDigitalThreshold(size_t /*channel*/, float level)
 bool DSLabsOscilloscope::CanEnableChannel(size_t /*i*/)
 {
 	return true;
+}
+
+uint64_t DSLabsOscilloscope::GetMSSinceEpoch() {
+	auto millisec_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	return millisec_since_epoch;
 }
