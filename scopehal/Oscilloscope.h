@@ -849,9 +849,9 @@ protected:
 		int64_t* offs, int64_t* durs, float* pout, int16_t* pin, float gain, float offset, size_t count, int64_t ibase);
 
 public:
-	bool HasPendingWaveforms();
+	virtual bool HasPendingWaveforms();
 	virtual void ClearPendingWaveforms();
-	size_t GetPendingWaveformCount();
+	virtual size_t GetPendingWaveformCount();
 	virtual bool PopPendingWaveform();
 
 protected:

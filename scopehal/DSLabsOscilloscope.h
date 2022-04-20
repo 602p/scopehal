@@ -66,6 +66,7 @@ public:
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger();
 	virtual bool AcquireData();
+	virtual bool HasPendingWaveforms();
 	virtual bool PopPendingWaveform();
 	virtual void ClearPendingWaveforms();
 

@@ -428,7 +428,7 @@ bool DSLabsOscilloscope::AcquireData()
 	m_pendingWaveformTimestamps.push_back(timestamp);
 	while (m_pendingWaveforms.size() > 2) {
 		// This is key.
-		printf(" [drop] "); fflush(stdout);
+		printf(" [DROP] "); fflush(stdout);
 		m_pendingWaveforms.pop_front();
 		m_pendingWaveformTimestamps.pop_front();
 	}
@@ -439,6 +439,24 @@ bool DSLabsOscilloscope::AcquireData()
 		m_triggerArmed = false;
 
 	return true;
+}
+
+bool DSLabsOscilloscope::HasPendingWaveforms()
+{
+	bool answer;
+
+	{
+		lock_guard<mutex> lock(m_pendingWaveformsMutex);
+		answer = (m_pendingWaveforms.size() != 0);
+	}
+
+	if (!answer)
+	{
+		printf(" [strv] "); fflush(stdout);
+		AckToTimestamp(0);
+	}
+
+	return answer;
 }
 
 bool DSLabsOscilloscope::PopPendingWaveform()
