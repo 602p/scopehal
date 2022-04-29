@@ -345,7 +345,8 @@ void TektronixOscilloscope::DetectProbes()
 
 void TektronixOscilloscope::FlushConfigCache()
 {
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	lock_guard<recursive_mutex> lock(m_transport->GetMutex()); // Need to lock this to avoid deadlocking with AcquireData
+	lock_guard<recursive_mutex> lock2(m_cacheMutex);
 
 	m_channelOffsets.clear();
 	m_channelVoltageRanges.clear();
@@ -1449,8 +1450,8 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// Set source & get preamble+data
 		m_transport->SendCommandImmediate(string("DAT:SOU ") + m_channels[i]->GetHwname());
 
-		m_transport->SendCommandImmediate("DATA:START 1");
-		m_transport->SendCommandImmediate("DATA:STOP 1000");
+		// m_transport->SendCommandImmediate("DATA:START 1");
+		// m_transport->SendCommandImmediate("DATA:STOP 1000");
 		// Chunk this into 1Mpts transferts to avoid timing out (and to allow better error recovery?)
 		// by collecting chunks into std::vector<int8_t*> and then invoking Convert8BitSamples with
 		// increasingly-far-into-m_XXX points for the waveform params and each int8_t* in turn.
@@ -1462,20 +1463,28 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		//Ask for the waveform preamble
 		string preamble = m_transport->SendCommandImmediateWithReply("WFMO?", false);
 
-		LogDebug("Preamble: %s\n", preamble.c_str());
+		// LogDebug("Channel %zu (%s)\n", i, m_channels[i]->GetHwname().c_str());
+		LogIndenter li2;
+
+		// LogDebug("Preamble: %s\n", preamble.c_str());
 
 		//Process it (grab the whole block, semicolons and all)
-		sscanf(preamble.c_str(),
+		int read = sscanf(preamble.c_str(),
 			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
 			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
 			&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
 			xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
 
+		if (read != 22)
+		{
+			// Seems to return incomplete header information if rate/depth reconfiguration is proceeding during query
+			LogWarning("Preamble error reading channel %zu (%s); skipping\n", i, m_channels[i]->GetHwname().c_str());
+			pending_waveforms[i].push_back(NULL);
+			continue;
+		}
+
 		timebase = xincrement * FS_PER_SECOND;	//scope gives sec, not fs
 		m_channelOffsets[i] = -yoff;
-
-		//LogDebug("Channel %zu (%s)\n", i, m_channels[i]->GetHwname().c_str());
-		LogIndenter li2;
 
 		//Read the data block
 		size_t nsamples;
@@ -1484,8 +1493,17 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		{
 			//Resynchronize
 			LogWarning("Timeout, attempting to recover\n");
-			while(IDPing() == "")
-			{}
+			while(1)
+			{
+				m_transport->SendCommandImmediate("\n*CLS");
+				// The manual has very confusing things to say about this needing to follow an "<EOI>" which
+				// appears to be a holdover from IEEE488 that IDK how is supposed to work (or not) over socket
+				// transport. Who knows. Another option: set Protocol to Terminal in socket server settings and
+				// use '!d' which issues the "DCL (Device CLear) control message" but this means dealing with
+				// prompts and stuff like that.
+				if (IDPing() != "")
+					break;
+			}
 
 			return false;
 		}
@@ -1519,7 +1537,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 		//Throw out garbage at the end of the message (why is this needed?)
 		string garbage = m_transport->ReadReply();
-		LogWarning("Threw out %ld bytes reading: '%s'\n", garbage.length(), garbage.c_str());
+		if (garbage.length()) LogWarning("Threw out %ld bytes reading: '%s'\n", garbage.length(), garbage.c_str());
 	}
 
 	//Get the spectrum stuff
@@ -1865,7 +1883,7 @@ vector<uint64_t> TektronixOscilloscope::GetSampleDepthsNonInterleaved()
 	vector<uint64_t> ret;
 
 	const int64_t k = 1000;
-	//const int64_t m = k*k;
+	const int64_t m = k*k;
 
 	switch(m_family)
 	{
@@ -1888,7 +1906,6 @@ vector<uint64_t> TektronixOscilloscope::GetSampleDepthsNonInterleaved()
 
 				//Deeper memory is disabled because using it seems to crash the scope firmware. Not sure why yet.
 
-				/*
 				ret.push_back(1 * m);
 				ret.push_back(2 * m);
 				ret.push_back(5 * m);
@@ -1896,7 +1913,6 @@ vector<uint64_t> TektronixOscilloscope::GetSampleDepthsNonInterleaved()
 				ret.push_back(20 * m);
 				ret.push_back(50 * m);
 				ret.push_back(62500 * k);
-				*/
 			}
 			break;
 
