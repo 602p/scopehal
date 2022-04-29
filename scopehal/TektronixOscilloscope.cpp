@@ -1449,8 +1449,20 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// Set source & get preamble+data
 		m_transport->SendCommandImmediate(string("DAT:SOU ") + m_channels[i]->GetHwname());
 
+		m_transport->SendCommandImmediate("DATA:START 1");
+		m_transport->SendCommandImmediate("DATA:STOP 1000");
+		// Chunk this into 1Mpts transferts to avoid timing out (and to allow better error recovery?)
+		// by collecting chunks into std::vector<int8_t*> and then invoking Convert8BitSamples with
+		// increasingly-far-into-m_XXX points for the waveform params and each int8_t* in turn.
+		// Need to find out total nrpoints... is m_sampleDepth OK? (How to make sure this took effect?)
+		// Query HOR:MODE:RECO? ... note that we are setting DATA:STOP in ->Get and ->SetSampleDepth
+		// also note comment in programmers manual that DATA:STOP is not respected in CURV? queries,
+		// use WAVFRM? instead? but it seems that it may be respected in contradiction to the manual.
+
 		//Ask for the waveform preamble
 		string preamble = m_transport->SendCommandImmediateWithReply("WFMO?", false);
+
+		LogDebug("Preamble: %s\n", preamble.c_str());
 
 		//Process it (grab the whole block, semicolons and all)
 		sscanf(preamble.c_str(),
@@ -1506,7 +1518,8 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		delete[] samples;
 
 		//Throw out garbage at the end of the message (why is this needed?)
-		m_transport->ReadReply();
+		string garbage = m_transport->ReadReply();
+		LogWarning("Threw out %ld bytes reading: '%s'\n", garbage.length(), garbage.c_str());
 	}
 
 	//Get the spectrum stuff
