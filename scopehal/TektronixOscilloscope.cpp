@@ -1414,6 +1414,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 	IDPing();
 
 	//Make sure record length is valid
+	m_sampleDepthValid = false;
 	GetSampleDepth();
 
 	//Preamble fields (not all are used)
@@ -1459,8 +1460,6 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// Set source & get preamble+data
 		m_transport->SendCommandImmediate(string("DAT:SOU ") + m_channels[i]->GetHwname());
 
-		// m_transport->SendCommandImmediate("DATA:START 1");
-		// m_transport->SendCommandImmediate("DATA:STOP 1000");
 		// Chunk this into 1Mpts transferts to avoid timing out (and to allow better error recovery?)
 		// by collecting chunks into std::vector<int8_t*> and then invoking Convert8BitSamples with
 		// increasingly-far-into-m_XXX points for the waveform params and each int8_t* in turn.
@@ -1515,25 +1514,85 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		timebase = xincrement * FS_PER_SECOND;	//scope gives sec, not fs
 		m_channelOffsets[i] = -yoff;
 
-		//Read the data block
-		size_t nsamples;
-		int8_t* samples = (int8_t*)m_transport->SendCommandImmediateWithRawBlockReply("CURV?", nsamples);
-		if(samples == NULL)
+		vector<int8_t*> sample_chunks;
+
+		// This chunking seems less important than that it can recover from a timeout reading a CURV?
+		// Do we need chunking at all if we instead of immediately blocking (and timing out) on the response to a CURV?
+		// and then retrying, if we instead gracefully wait for it to start sending data?
+
+		size_t chunk_size = 1000 * 5000;
+		size_t chunks = floor((double)m_sampleDepth / (double)chunk_size) + 1;
+		size_t last_chunk_size = m_sampleDepth - ((chunks-1) * chunk_size);
+
+		LogDebug("Going to move %ld points in %ld chunks of %ld each + (maybe) tail chunk of %ld\n", m_sampleDepth, chunks-1, chunk_size, last_chunk_size);
+
+		size_t total_samples = 0;
+
+		for (size_t chunk = 0; chunk < chunks; chunk++)
 		{
-			//Resynchronize
-			LogWarning("Timeout, attempting to recover\n");
-			while(1)
+			try_again:
+			bool last_chunk = chunk == chunks - 1;
+			size_t size = last_chunk ? last_chunk_size : chunk_size;
+
+			if (size == 0)
 			{
-				m_transport->SendCommandImmediate("\n*CLS");
-				// The manual has very confusing things to say about this needing to follow an "<EOI>" which
-				// appears to be a holdover from IEEE488 that IDK how is supposed to work (or not) over socket
-				// transport. Who knows. Another option: set Protocol to Terminal in socket server settings and
-				// use '!d' which issues the "DCL (Device CLear) control message" but this means dealing with
-				// prompts and stuff like that.
-				if (IDPing() != "")
-					break;
+				LogDebug("(Not actually moving extra chunk of 0)\n");
+				continue;
 			}
 
+			size_t start = chunk * chunk_size;
+			size_t stop = start + size;
+			m_transport->SendCommandImmediate("DATA:START " + to_string(start + 1));
+			m_transport->SendCommandImmediate("DATA:STOP " + to_string(stop));
+
+			LogDebug("Moving chunk %ld / %ld; %ld samples (%ld - %ld)\n", chunk+1, chunks-1, size, start, stop);
+
+			//Read the data block
+			size_t nsamples;
+			int8_t* samples = (int8_t*)m_transport->SendCommandImmediateWithRawBlockReply("CURV?", nsamples);
+
+			if(samples == NULL)
+			{
+				//Resynchronize
+				LogWarning("Timeout, attempting to recover\n");
+				while(1)
+				{
+					m_transport->SendCommandImmediate("\n*CLS");
+					// The manual has very confusing things to say about this needing to follow an "<EOI>" which
+					// appears to be a holdover from IEEE488 that IDK how is supposed to work (or not) over socket
+					// transport. Who knows. Another option: set Protocol to Terminal in socket server settings and
+					// use '!d' which issues the "DCL (Device CLear) control message" but this means dealing with
+					// prompts and stuff like that.
+					if (IDPing() != "")
+						break;
+				}
+
+				goto try_again;
+			}
+
+			if (nsamples != stop - start)
+			{
+				LogWarning("Confused! Chunk %ld expected %ld samples (%ld - %ld) but got %ld\n", i, stop-start, start, stop, nsamples);
+				LogDebug("Actual values returned: ");
+				for (size_t p = 0; p < min(nsamples, (size_t)64); p++)
+					LogDebug("%d/%c ", samples[p], samples[p]);
+				LogDebug("\n");
+				return false;
+			}
+
+			LogDebug(" -> Yielded %ld samples into *%p\n", nsamples, samples);
+			total_samples += nsamples;
+			sample_chunks.push_back(samples);
+
+			//Throw out garbage at the end of the message (why is this needed?)
+			string garbage = m_transport->ReadReply();
+			if (garbage.length()) LogWarning("Threw out %ld bytes reading: '%s'\n", garbage.length(), garbage.c_str());
+		}
+
+		LogDebug("Done Moving, moved %ld\n", total_samples);
+		if (total_samples != m_sampleDepth)
+		{
+			LogWarning("Confused! Wanted to move %ld but moved %ld\n", m_sampleDepth, total_samples);
 			return false;
 		}
 
@@ -1546,27 +1605,36 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		cap->m_startTimestamp = time(NULL);
 		double t = GetTime();
 		cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
-		cap->Resize(nsamples);
+		cap->Resize(m_sampleDepth);
 
-		Convert8BitSamples(
-			(int64_t*)&cap->m_offsets[0],
-			(int64_t*)&cap->m_durations[0],
-			(float*)&cap->m_samples[0],
-			samples,
-			ymult,
-			-yoff,
-			nsamples,
-			0);
+		for (size_t chunk = 0; chunk < chunks; chunk++)
+		{
+			bool last_chunk = chunk == chunks - 1;
+			size_t size = last_chunk ? last_chunk_size : chunk_size;
+
+			if (size == 0) continue;
+
+			size_t start = chunk * chunk_size;
+
+			LogDebug("Converting %ld samples at %ld - %ld (from *%p)\n", size, start, start+size, sample_chunks[chunk]);
+
+			Convert8BitSamples(
+				(int64_t*)&cap->m_offsets[start],
+				(int64_t*)&cap->m_durations[start],
+				(float*)&cap->m_samples[start],
+				sample_chunks[chunk],
+				ymult,
+				-yoff,
+				size,
+				0);
+		}
 
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
 
 		//Done
-		delete[] samples;
-
-		//Throw out garbage at the end of the message (why is this needed?)
-		string garbage = m_transport->ReadReply();
-		if (garbage.length()) LogWarning("Threw out %ld bytes reading: '%s'\n", garbage.length(), garbage.c_str());
+		for (auto sample : sample_chunks)
+			delete[] sample;
 	}
 
 	//Get the spectrum stuff
@@ -1941,7 +2009,8 @@ vector<uint64_t> TektronixOscilloscope::GetSampleDepthsNonInterleaved()
 				ret.push_back(10 * m);
 				ret.push_back(20 * m);
 				ret.push_back(50 * m);
-				ret.push_back(62500 * k);
+				ret.push_back(100 * m);
+				ret.push_back(125 * m);
 			}
 			break;
 
