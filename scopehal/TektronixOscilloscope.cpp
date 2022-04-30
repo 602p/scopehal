@@ -310,6 +310,12 @@ unsigned int TektronixOscilloscope::GetInstrumentTypes()
 
 void TektronixOscilloscope::DetectProbes()
 {
+	std::vector<bool> currentlyEnabled;
+	for (size_t i = 0; i < m_analogChannelCount; i++)
+	{
+		currentlyEnabled.push_back(IsChannelEnabled(i));
+	}
+
 	switch(m_family)
 	{
 		case FAMILY_MSO5:
@@ -340,6 +346,12 @@ void TektronixOscilloscope::DetectProbes()
 
 		default:
 			break;
+	}
+
+	for (size_t i = 0; i < m_analogChannelCount; i++)
+	{
+		if (currentlyEnabled[i]) EnableChannel(i);
+		else                     DisableChannel(i);
 	}
 }
 
@@ -377,36 +389,33 @@ bool TektronixOscilloscope::IsChannelEnabled(size_t i)
 	if(m_extTrigChannel && i == m_extTrigChannel->GetIndex())
 		return false;
 
-	//Pre-checks based on type
-	if(IsDigital(i))
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 
-		//If the parent analog channel doesn't have a digital probe, we're disabled
-		size_t parent = m_flexChannelParents[m_channels[i]];
-		if(m_probeTypes[parent] != PROBE_TYPE_DIGITAL_8BIT)
-			return false;
-	}
-	else if(IsAnalog(i))
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		if(m_probeTypes.find(i) != m_probeTypes.end())
+		{
+			//Pre-checks based on type
+			if(IsDigital(i))
+			{
+				//If the parent analog channel doesn't have a digital probe, we're disabled
+				size_t parent = m_flexChannelParents[m_channels[i]];
+				if(m_probeTypes[parent] != PROBE_TYPE_DIGITAL_8BIT)
+					return false;
+			}
+			else if(IsAnalog(i))
+			{
+				//If we're an analog channel with a digital probe connected, the analog channel is unusable
+				if(m_probeTypes[i] == PROBE_TYPE_DIGITAL_8BIT)
+					return false;
+			}
+			else if(IsSpectrum(i))
+			{
+				//If we're an analog channel with a digital probe connected, the analog channel is unusable
+				if(m_probeTypes[i - m_spectrumChannelBase] == PROBE_TYPE_DIGITAL_8BIT)
+					return false;
+			}
+		}
 
-		//If we're an analog channel with a digital probe connected, the analog channel is unusable
-		if(m_probeTypes[i] == PROBE_TYPE_DIGITAL_8BIT)
-			return false;
-	}
-	else if(IsSpectrum(i))
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-
-		//If we're an analog channel with a digital probe connected, the analog channel is unusable
-		if(m_probeTypes[i - m_spectrumChannelBase] == PROBE_TYPE_DIGITAL_8BIT)
-			return false;
-	}
-
-	//Check the cache
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		if(m_channelsEnabled.find(i) != m_channelsEnabled.end())
 			return m_channelsEnabled[i];
 	}
@@ -425,7 +434,7 @@ bool TektronixOscilloscope::IsChannelEnabled(size_t i)
 			}
 			else
 			{
-				m_transport->SendCommandQueuedWithReply(
+				reply = m_transport->SendCommandQueuedWithReply(
 					string("DISP:WAVEV:") + m_channels[i]->GetHwname() + ":STATE?");
 			}
 			break;
@@ -1466,22 +1475,42 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// LogDebug("Channel %zu (%s)\n", i, m_channels[i]->GetHwname().c_str());
 		LogIndenter li2;
 
-		// LogDebug("Preamble: %s\n", preamble.c_str());
+		size_t semicolons = std::count(preamble.begin(), preamble.end(), ';');
 
-		//Process it (grab the whole block, semicolons and all)
-		int read = sscanf(preamble.c_str(),
-			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
-			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
-			&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
-			xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
+		int read = 0;
 
-		if (read != 22)
+		if (semicolons == 23)
 		{
-			// Seems to return incomplete header information if rate/depth reconfiguration is proceeding during query
-			LogWarning("Preamble error reading channel %zu (%s); skipping\n", i, m_channels[i]->GetHwname().c_str());
+			//Process it (grab the whole block, semicolons and all)
+			read = sscanf(preamble.c_str(),
+				"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
+				"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
+				&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
+				xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
+
+			if (read != 22) goto fail_parse;
+		}
+		else if (semicolons == 22)
+		{
+			read = sscanf(preamble.c_str(),
+				"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%d;%c;%31[^;];"
+				"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
+				&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, &nr_pt, pt_fmt, pt_order,
+				xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
+			strcpy(wfid, "<unknown>");
+
+			if (read != 21) goto fail_parse;
+		}
+		else
+		{
+			fail_parse:
+			LogWarning("Preamble error reading channel %zu (%s); skipping (read only %d)\n", i, m_channels[i]->GetHwname().c_str(), read);
+			LogDebug(" -> Failed preamble: %s\n", preamble.c_str());
 			pending_waveforms[i].push_back(NULL);
 			continue;
 		}
+		
+		LogDebug("Preamble: %s\n", preamble.c_str());
 
 		timebase = xincrement * FS_PER_SECOND;	//scope gives sec, not fs
 		m_channelOffsets[i] = -yoff;
