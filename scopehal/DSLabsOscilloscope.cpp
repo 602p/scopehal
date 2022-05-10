@@ -49,9 +49,19 @@ using namespace std;
 
 DSLabsOscilloscope::DSLabsOscilloscope(SCPITransport* transport)
 	: RemoteBridgeOscilloscope(transport, true)
+	, m_diag_hardwareWFMHz(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_HZ))
+	, m_diag_receivedWFMHz(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_HZ))
+	, m_diag_totalWFMs(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS))
+	, m_diag_droppedWFMs(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS))
+	, m_diag_droppedPercent(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_PERCENT))
+	, m_diag_droppedPerSec(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_HZ))
+	, m_diag_starved(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS))
+	, m_diag_starvePerSec(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_HZ))
 {
 	//Set up initial cache configuration as "not valid" and let it populate as we go
 	IdentifyHardware();
+
+	AddDiagnosticLog("Found Model: " + m_model);
 
 	//Add analog channel objects
 	for(size_t i = 0; i < m_analogChannelCount; i++)
@@ -120,6 +130,32 @@ DSLabsOscilloscope::DSLabsOscilloscope(SCPITransport* transport)
 	SetTrigger(trig);
 	PushTrigger();
 	SetTriggerOffset(1000000000000); //1ms to allow trigphase interpolation
+
+	m_diagnosticValues["Hardware WFM/s"] = &m_diag_hardwareWFMHz;
+	m_diagnosticValues["Received WFM/s"] = &m_diag_receivedWFMHz;
+	m_diagnosticValues["Total Waveforms Received"] = &m_diag_totalWFMs;
+	m_diagnosticValues["Received Waveforms Dropped"] = &m_diag_droppedWFMs;
+	m_diagnosticValues["% Received Waveforms Dropped"] = &m_diag_droppedPercent;
+	m_diagnosticValues["Waveforms Dropped per sec"] = &m_diag_droppedPerSec;
+	m_diagnosticValues["Starvations"] = &m_diag_starved;
+	m_diagnosticValues["Starvations per sec"] = &m_diag_starvePerSec;
+
+	ResetPerCaptureDiagnostics();
+}
+
+void DSLabsOscilloscope::ResetPerCaptureDiagnostics()
+{
+	m_diag_hardwareWFMHz.SetFloatVal(0);
+	m_diag_receivedWFMHz.SetFloatVal(0);
+	m_diag_totalWFMs.SetIntVal(0);
+	m_diag_droppedWFMs.SetIntVal(0);
+	m_diag_droppedPercent.SetFloatVal(1);
+	m_diag_droppedPerSec.SetFloatVal(0);
+	m_diag_starved.SetIntVal(0);
+	m_diag_starvePerSec.SetFloatVal(0);
+	m_dropClock.Reset();
+	m_starveClock.Reset();
+	m_receiveClock.Reset();
 }
 
 /**
@@ -272,6 +308,31 @@ bool DSLabsOscilloscope::AcquireData()
 	if(!m_transport->ReadRawData(sizeof(fs_per_sample), (uint8_t*)&fs_per_sample))
 		return false;
 
+	//Get the de-facto trigger position.
+	int64_t trigger_fs;
+	if(!m_transport->ReadRawData(sizeof(trigger_fs), (uint8_t*)&trigger_fs))
+		return false;
+
+	{
+		lock_guard<recursive_mutex> lock(m_mutex);
+		if (m_triggerOffset != trigger_fs)
+		{
+			AddDiagnosticLog("Correcting trigger offset by " + to_string(m_triggerOffset - trigger_fs));
+			m_triggerOffset = trigger_fs;
+		}
+	}
+
+	//Get the de-facto hardware capture rate.
+	double wfms_s;
+	if(!m_transport->ReadRawData(sizeof(wfms_s), (uint8_t*)&wfms_s))
+		return false;
+
+	m_diag_hardwareWFMHz.SetFloatVal(wfms_s);
+
+	// AddDiagnosticLog("Something... " + to_string(GetTime()));
+
+	// LogDebug("Receive header: SEQ#%u, %d channels\n", seqnum, numChannels);
+
 	//Acquire data for each channel
 	size_t chnum;
 	size_t memdepth;
@@ -420,19 +481,44 @@ bool DSLabsOscilloscope::AcquireData()
 		delete[] abufs[i];
 	}
 
+	FilterParameter* param = &m_diag_totalWFMs;
+	int total = param->GetIntVal() + 1;
+	param->SetIntVal(total);
+
+	param = &m_diag_droppedWFMs;
+	int dropped = param->GetIntVal();
+
 	//Save the waveforms to our queue
 	m_pendingWaveformsMutex.lock();
 	
 		
 	m_pendingWaveforms.push_back(s);
 	m_pendingWaveformTimestamps.push_back(timestamp);
-	while (m_pendingWaveforms.size() > 2) {
-		// This is key.
-		printf(" [DROP] "); fflush(stdout);
+	while (m_pendingWaveforms.size() > 2)
+	{
+		SequenceSet set = *m_pendingWaveforms.begin();
+		for(auto it : set)
+			delete it.second;
 		m_pendingWaveforms.pop_front();
 		m_pendingWaveformTimestamps.pop_front();
+		printf(" [DROP] "); fflush(stdout);
+		m_dropClock.Tick();
+
+		dropped++;
 	}
+
 	m_pendingWaveformsMutex.unlock();
+
+	param->SetIntVal(dropped);
+
+	param = &m_diag_droppedPercent;
+	param->SetFloatVal((float)dropped / (float)total);
+
+	param = &m_diag_droppedPerSec;
+	param->SetFloatVal(m_dropClock.GetAverageHz());
+
+	m_receiveClock.Tick();
+	m_diag_receivedWFMHz.SetFloatVal(m_receiveClock.GetAverageHz());
 
 	//If this was a one-shot trigger we're no longer armed
 	if(m_triggerOneShot)
@@ -454,6 +540,15 @@ bool DSLabsOscilloscope::HasPendingWaveforms()
 	{
 		printf(" [strv] "); fflush(stdout);
 		AckToTimestamp(0);
+
+		FilterParameter* param = &m_diag_starved;
+		int starved = param->GetIntVal() + 1;
+		param->SetIntVal(starved);
+
+		m_starveClock.Tick();
+
+		param = &m_diag_starvePerSec;
+		param->SetFloatVal(m_starveClock.GetAverageHz());
 	}
 
 	return answer;
@@ -499,6 +594,24 @@ void DSLabsOscilloscope::AckToTimestamp(uint64_t ms)
 	m_lastAcked = ms;
 	uint64_t update[2] = {ms, 0};
 	m_transport->SendRawData(sizeof(update), (uint8_t*)update);
+}
+
+void DSLabsOscilloscope::Start()
+{
+	RemoteBridgeOscilloscope::Start();
+	ResetPerCaptureDiagnostics();
+}
+
+void DSLabsOscilloscope::StartSingleTrigger()
+{
+	RemoteBridgeOscilloscope::StartSingleTrigger();
+	ResetPerCaptureDiagnostics();
+}
+
+void DSLabsOscilloscope::ForceTrigger()
+{
+	RemoteBridgeOscilloscope::ForceTrigger();
+	ResetPerCaptureDiagnostics();
 }
 
 vector<uint64_t> DSLabsOscilloscope::GetSampleRatesNonInterleaved()

@@ -31,6 +31,7 @@
 #define DSLabsOscilloscope_h
 
 #include "RemoteBridgeOscilloscope.h"
+#include "../xptools/HzClock.h"
 
 #include <atomic>
 #include <deque>
@@ -69,6 +70,11 @@ public:
 	virtual bool HasPendingWaveforms();
 	virtual bool PopPendingWaveform();
 	virtual void ClearPendingWaveforms();
+
+	// Captures
+	virtual void Start();
+	virtual void StartSingleTrigger();
+	virtual void ForceTrigger();
 
 	//Timebase
 	virtual std::vector<uint64_t> GetSampleRatesNonInterleaved();
@@ -109,6 +115,7 @@ public:
 
 protected:
 	void IdentifyHardware();
+	void ResetPerCaptureDiagnostics();
 
 	std::string GetChannelColor(size_t i);
 
@@ -130,6 +137,18 @@ protected:
 	void AckToTimestamp(uint64_t ms);
 
 	Series m_series;
+
+	FilterParameter m_diag_hardwareWFMHz;
+	FilterParameter m_diag_receivedWFMHz;
+	FilterParameter m_diag_totalWFMs;
+	FilterParameter m_diag_droppedWFMs;
+	FilterParameter m_diag_droppedPercent;
+	FilterParameter m_diag_droppedPerSec;
+	FilterParameter m_diag_starved;
+	FilterParameter m_diag_starvePerSec;
+	HzClock m_dropClock;
+	HzClock m_starveClock;
+	HzClock m_receiveClock;
 
 public:
 
