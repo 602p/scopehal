@@ -251,19 +251,41 @@ void* SCPITransport::SendCommandImmediateWithRawBlockReply(string cmd, size_t& l
 		RateLimitingWait();
 	SendCommand(cmd);
 
+	
 	//Read the length
 	char tmplen[3] = {0};
 	if(2 != ReadRawData(2, (unsigned char*)tmplen))			//expect #n
 		return NULL;
 	if(tmplen[0] == 0)	//Not sure how this happens, but sometimes occurs on Tek MSO6?
 		return NULL;
-	size_t ndigits = stoull(tmplen+1);
+
+	size_t ndigits;
+	try
+	{
+		ndigits = stoull(tmplen+1);
+	}
+	catch (const std::invalid_argument& ia)
+	{
+		// stoull blew up. Sometimes happens on Tek
+		LogError("SendCommandImmediateWithRawBlockReply, stoull failed on ndigits: '%s'\n", tmplen);
+		return NULL;
+	}
 
 	//Read the digits
 	char digits[10] = {0};
 	if(ndigits != ReadRawData(ndigits, (unsigned char*)digits))
 		return NULL;
-	len = stoull(digits);
+
+	try{
+		len = stoull(digits);
+	}
+	catch (const std::invalid_argument& ia)
+	{
+		// stoull blew up. Sometimes happens on Tek
+		LogError("SendCommandImmediateWithRawBlockReply, stoull failed on digits: '%s' (ndigits=%ld)\n", digits, ndigits);
+		return NULL;
+	}
+	
 
 	//Read the actual data
 	unsigned char* buf = new unsigned char[len];

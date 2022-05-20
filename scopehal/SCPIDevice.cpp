@@ -44,6 +44,9 @@ SCPIDevice::SCPIDevice(SCPITransport* transport, bool identify)
 {
 	if(identify)
 	{
+		//Flush anything in the device's output queue (Tek...)
+		m_transport->ReadReply();
+
 		//Ask for the ID
 		m_transport->SendCommand("*IDN?");
 		string reply = m_transport->ReadReply();
