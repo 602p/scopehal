@@ -60,10 +60,6 @@ DeEmbedFilter::DeEmbedFilter(const string& color)
 	m_parameters[m_groupDelayTruncModeName].AddEnumValue("Manual", TRUNC_MANUAL);
 	m_parameters[m_groupDelayTruncModeName].SetIntVal(TRUNC_AUTO);
 
-	m_range = 1;
-	m_offset = 0;
-	m_min = FLT_MAX;
-	m_max = -FLT_MAX;
 	m_cachedBinSize = 0;
 
 	m_forwardPlan = NULL;
@@ -228,41 +224,9 @@ bool DeEmbedFilter::ValidateChannel(size_t i, StreamDescriptor stream)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Accessors
 
-float DeEmbedFilter::GetVoltageRange(size_t /*stream*/)
-{
-	return m_range;
-}
-
-float DeEmbedFilter::GetOffset(size_t /*stream*/)
-{
-	return m_offset;
-}
-
 string DeEmbedFilter::GetProtocolName()
 {
 	return "De-Embed";
-}
-
-bool DeEmbedFilter::NeedsConfig()
-{
-	//we need the offset to be specified, duh
-	return true;
-}
-
-void DeEmbedFilter::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(
-		hwname,
-		sizeof(hwname),
-		"DeEmbed(%s, %s, %s)",
-		GetInputDisplayName(0).c_str(),
-		GetInputDisplayName(1).c_str(),
-		GetInputDisplayName(2).c_str()
-		);
-
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -271,14 +235,6 @@ void DeEmbedFilter::SetDefaultName()
 void DeEmbedFilter::Refresh()
 {
 	DoRefresh(true);
-}
-
-void DeEmbedFilter::ClearSweeps()
-{
-	m_range = 1;
-	m_offset = 0;
-	m_min = FLT_MAX;
-	m_max = -FLT_MAX;
 }
 
 /**
@@ -591,23 +547,11 @@ void DeEmbedFilter::DoRefresh(bool invert)
 		cap->m_triggerPhase = groupdelay_fs;
 
 	//Copy waveform data after rescaling
+	//TODO: vectorize this
 	float scale = 1.0f / npoints;
-	float vmin = FLT_MAX;
-	float vmax = -FLT_MAX;
 	size_t outlen = iend - istart;
 	for(size_t i=0; i<outlen; i++)
-	{
-		float v = m_reverseOutBuf[i+istart] * scale;
-		vmin = min(v, vmin);
-		vmax = max(v, vmax);
-		cap->m_samples[i] = v;
-	}
-
-	//Calculate bounds
-	m_max = max(m_max, vmax);
-	m_min = min(m_min, vmin);
-	m_range = (m_max - m_min) * 1.05;
-	m_offset = -( (m_max - m_min)/2 + m_min );
+		cap->m_samples[i] = m_reverseOutBuf[i+istart] * scale;
 }
 
 /**
@@ -676,8 +620,8 @@ void DeEmbedFilter::MainLoop(size_t nouts)
 {
 	for(size_t i=0; i<nouts; i++)
 	{
-		float cosval = m_resampledSparamSines[i];
-		float sinval = m_resampledSparamCosines[i];
+		float sinval = m_resampledSparamSines[i];
+		float cosval = m_resampledSparamCosines[i];
 
 		//Uncorrected complex value
 		float real_orig = m_forwardOutBuf[i*2 + 0];

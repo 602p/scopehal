@@ -83,23 +83,9 @@ bool ClockRecoveryFilter::ValidateChannel(size_t i, StreamDescriptor stream)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Accessors
 
-void ClockRecoveryFilter::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "ClockRec(%s)", GetInputDisplayName(0).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
-}
-
 string ClockRecoveryFilter::GetProtocolName()
 {
 	return "Clock Recovery (PLL)";
-}
-
-bool ClockRecoveryFilter::NeedsConfig()
-{
-	//we have need the base symbol rate configured
-	return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

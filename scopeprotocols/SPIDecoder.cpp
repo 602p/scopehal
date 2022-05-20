@@ -53,11 +53,6 @@ SPIDecoder::SPIDecoder(const string& color)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Factory methods
 
-bool SPIDecoder::NeedsConfig()
-{
-	return true;
-}
-
 bool SPIDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 {
 	if(stream.m_channel == NULL)
@@ -72,14 +67,6 @@ bool SPIDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 string SPIDecoder::GetProtocolName()
 {
 	return "SPI";
-}
-
-void SPIDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "SPI(%s)",	GetInputDisplayName(2).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

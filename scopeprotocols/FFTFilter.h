@@ -49,17 +49,9 @@ public:
 
 	virtual void Refresh();
 
-	virtual bool NeedsConfig();
-
 	static std::string GetProtocolName();
-	virtual void SetDefaultName();
 
-	virtual float GetVoltageRange(size_t stream);
-	virtual float GetOffset(size_t stream);
 	virtual bool ValidateChannel(size_t i, StreamDescriptor stream);
-
-	virtual void SetVoltageRange(float range, size_t stream);
-	virtual void SetOffset(float offset, size_t stream);
 
 	enum WindowFunction
 	{
@@ -104,9 +96,6 @@ protected:
 	std::vector<float, AlignedAllocator<float, 64> > m_rdinbuf;
 	std::vector<float, AlignedAllocator<float, 64> > m_rdoutbuf;
 	ffts_plan_t* m_plan;
-
-	float m_range;
-	float m_offset;
 
 	std::string m_windowName;
 	std::string m_roundingName;

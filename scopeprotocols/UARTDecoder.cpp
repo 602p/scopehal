@@ -67,12 +67,6 @@ vector<string> UARTDecoder::GetHeaders()
 	return ret;
 }
 
-bool UARTDecoder::NeedsConfig()
-{
-	//baud rate has to be set
-	return true;
-}
-
 bool UARTDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 {
 	if(stream.m_channel == NULL)
@@ -86,14 +80,6 @@ bool UARTDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 string UARTDecoder::GetProtocolName()
 {
 	return "UART";
-}
-
-void UARTDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "UART(%s)", GetInputDisplayName(0).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

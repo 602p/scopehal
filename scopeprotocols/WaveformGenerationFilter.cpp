@@ -69,21 +69,6 @@ bool WaveformGenerationFilter::ValidateChannel(size_t i, StreamDescriptor stream
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Accessors
 
-bool WaveformGenerationFilter::NeedsConfig()
-{
-	return true;
-}
-
-float WaveformGenerationFilter::GetVoltageRange(size_t /*stream*/)
-{
-	return (GetMaxLevel() - GetMinLevel()) * 1.05;
-}
-
-float WaveformGenerationFilter::GetOffset(size_t /*stream*/)
-{
-	return -(GetMaxLevel() + GetMinLevel())/2;
-}
-
 float WaveformGenerationFilter::GetMaxLevel()
 {
 	auto levels = GetVoltageLevels();

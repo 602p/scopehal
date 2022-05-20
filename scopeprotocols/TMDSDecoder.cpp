@@ -56,12 +56,6 @@ TMDSDecoder::TMDSDecoder(const string& color)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Factory methods
 
-bool TMDSDecoder::NeedsConfig()
-{
-	//baud rate has to be set
-	return true;
-}
-
 bool TMDSDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 {
 	if(stream.m_channel == NULL)
@@ -76,14 +70,6 @@ bool TMDSDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 string TMDSDecoder::GetProtocolName()
 {
 	return "8b/10b (TMDS)";
-}
-
-void TMDSDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "TMDS(%s)", GetInputDisplayName(0).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

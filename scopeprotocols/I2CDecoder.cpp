@@ -53,11 +53,6 @@ I2CDecoder::I2CDecoder(const string& color)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Factory methods
 
-bool I2CDecoder::NeedsConfig()
-{
-	return true;
-}
-
 bool I2CDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 {
 	if(stream.m_channel == NULL)
@@ -72,17 +67,6 @@ bool I2CDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 string I2CDecoder::GetProtocolName()
 {
 	return "I2C";
-}
-
-void I2CDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "I2C(%s, %s)",
-		GetInputDisplayName(0).c_str(),
-		GetInputDisplayName(1).c_str()
-		);
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

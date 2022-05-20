@@ -69,24 +69,6 @@ string ESPIDecoder::GetProtocolName()
 	return "Intel eSPI";
 }
 
-bool ESPIDecoder::NeedsConfig()
-{
-	return true;
-}
-
-void ESPIDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "eSPI(%s, %s, %s, %s)",
-		GetInputDisplayName(2).c_str(),
-		GetInputDisplayName(3).c_str(),
-		GetInputDisplayName(4).c_str(),
-		GetInputDisplayName(5).c_str()
-		);
-	m_hwname = hwname;
-	m_displayname = m_hwname;
-}
-
 vector<string> ESPIDecoder::GetHeaders()
 {
 	vector<string> ret;

@@ -58,11 +58,6 @@ SDCmdDecoder::SDCmdDecoder(const string& color)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Factory methods
 
-bool SDCmdDecoder::NeedsConfig()
-{
-	return true;
-}
-
 string SDCmdDecoder::GetProtocolName()
 {
 	return "SD Card Command Bus";
@@ -77,15 +72,6 @@ bool SDCmdDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 		return true;
 
 	return false;
-}
-
-void SDCmdDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "SDCmd(%s, %s)",
-		GetInputDisplayName(0).c_str(), GetInputDisplayName(1).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

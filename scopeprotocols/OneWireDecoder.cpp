@@ -55,11 +55,6 @@ OneWireDecoder::~OneWireDecoder()
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Factory methods
 
-bool OneWireDecoder::NeedsConfig()
-{
-	return false;
-}
-
 bool OneWireDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 {
 	if(stream.m_channel == NULL)
@@ -73,14 +68,6 @@ bool OneWireDecoder::ValidateChannel(size_t i, StreamDescriptor stream)
 string OneWireDecoder::GetProtocolName()
 {
 	return "1-Wire";
-}
-
-void OneWireDecoder::SetDefaultName()
-{
-	char hwname[256];
-	snprintf(hwname, sizeof(hwname), "1Wire(%s)", GetInputDisplayName(0).c_str());
-	m_hwname = hwname;
-	m_displayname = m_hwname;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
