@@ -110,6 +110,10 @@ TektronixOscilloscope::TektronixOscilloscope(SCPITransport* transport)
 			m_transport->SendCommandQueued("SV:RBWMODE MAN");			//Manual resolution bandwidth control
 			m_transport->SendCommandQueued("SV:LOCKCENTER 0");			//Allow separate center freq per channel
 
+			m_transport->SendCommandQueued("TRIG:A:MODE NORMAL");
+			// Do not want the godforsaken auto trigger because this will put us in roll mode
+			// above a certain hdiv, and that screws up the transfer logic
+
 			m_maxBandwidth = 1e-6 * stof(
 				m_transport->SendCommandQueuedWithReply("CONFIG:ANALO:BANDW?"));	//Figure out what bandwidth we have
 																					//(so we know what probe BW is)
@@ -1284,6 +1288,8 @@ bool TektronixOscilloscope::AcquireData()
 
 	LogIndenter li;
 
+	bool acquire_success = true;
+
 	switch(m_family)
 	{
 		case FAMILY_MSO5:
@@ -1297,28 +1303,32 @@ bool TektronixOscilloscope::AcquireData()
 					for(auto w : vec)
 						delete w;
 				}
-				return false;
+				acquire_success = false;
 			}
 			break;
 
 		default:
+			acquire_success = false;
 			break;
 	}
 
-	//Now that we have all of the pending waveforms, save them in sets across all channels
-	m_pendingWaveformsMutex.lock();
-	size_t num_pending = 1;	//TODO: segmented capture support
-	for(size_t i=0; i<num_pending; i++)
+	if (acquire_success)
 	{
-		SequenceSet s;
-		for(size_t j=0; j<m_channels.size(); j++)
+		//Now that we have all of the pending waveforms, save them in sets across all channels
+		m_pendingWaveformsMutex.lock();
+		size_t num_pending = 1;	//TODO: segmented capture support
+		for(size_t i=0; i<num_pending; i++)
 		{
-			if(IsChannelEnabled(j))
-				s[m_channels[j]] = pending_waveforms[j][i];
+			SequenceSet s;
+			for(size_t j=0; j<m_channels.size(); j++)
+			{
+				if(IsChannelEnabled(j))
+					s[m_channels[j]] = pending_waveforms[j][i];
+			}
+			m_pendingWaveforms.push_back(s);
 		}
-		m_pendingWaveforms.push_back(s);
+		m_pendingWaveformsMutex.unlock();
 	}
-	m_pendingWaveformsMutex.unlock();
 
 	//Re-arm the trigger if not in one-shot mode
 	if(!m_triggerOneShot)
@@ -1334,6 +1344,60 @@ bool TektronixOscilloscope::AcquireData()
 	return true;
 }
 
+void TektronixOscilloscope::ResynchronizeSCPI()
+{
+	//Resynchronize
+	LogWarning("Timeout, attempting to recover\n");
+	while(1)
+	{
+		m_transport->ReadReply(); // Read and throw away garbage
+		m_transport->SendCommandImmediate("\n*CLS");
+		// The manual has very confusing things to say about this needing to follow an "<EOI>" which
+		// appears to be a holdover from IEEE488 that IDK how is supposed to work (or not) over socket
+		// transport. Who knows. Another option: set Protocol to Terminal in socket server settings and
+		// use '!d' which issues the "DCL (Device CLear) control message" but this means dealing with
+		// prompts and stuff like that.
+		if (IDPing() != "")
+			break;
+	}
+}
+
+bool TektronixOscilloscope::ReadPreamble(string& preamble_in, mso56_preamble& preamble_out)
+{
+	size_t semicolons = std::count(preamble_in.begin(), preamble_in.end(), ';');
+
+	int read = 0;
+	mso56_preamble& p = preamble_out;
+
+	if (semicolons == 23)
+	{
+		read = sscanf(preamble_in.c_str(),
+			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
+			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
+			&p.byte_num, &p.bit_num, p.encoding, p.bin_format, p.asc_format, p.byte_order, p.wfid,
+			&p.nr_pt, p.pt_fmt, p.pt_order, p.xunit, &p.xincrement_or_hzbase, &p.xzero_or_hzoff,
+			&p.pt_off, p.yunit,	&p.ymult, &p.yoff, &p.yzero, p.domain, p.wfmtype, &p.centerfreq, &p.span);
+
+		if (read == 22) return true;
+	}
+	else if (semicolons == 22)
+	{
+		read = sscanf(preamble_in.c_str(),
+			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%d;%c;%31[^;];" // wfid missing
+			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
+			&p.byte_num, &p.bit_num, p.encoding, p.bin_format, p.asc_format, p.byte_order,
+			&p.nr_pt, p.pt_fmt, p.pt_order, p.xunit, &p.xincrement_or_hzbase, &p.xzero_or_hzoff,
+			&p.pt_off, p.yunit,	&p.ymult, &p.yoff, &p.yzero, p.domain, p.wfmtype, &p.centerfreq, &p.span);
+		strcpy(p.wfid, "<missing (Tek bug)>");
+
+		if (read == 21) return true;
+	}
+	
+	LogWarning("Preamble error (read only %d fields)", read);
+	LogDebug(" -> Failed preamble: %s\n", preamble_in.c_str());
+	return false;
+}
+
 bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& pending_waveforms)
 {
 	//Seems like we might need a command before reading data after the trigger?
@@ -1343,33 +1407,8 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 	m_sampleDepthValid = false;
 	GetSampleDepth();
 
-	//Preamble fields (not all are used)
-	int byte_num;
-	int bit_num;
-	char encoding[32];
-	char bin_format[32];
-	char asc_format[32];
-	char byte_order[32];
-	char wfid[256];
-	int nr_pt;
-	char pt_fmt[32];
-	char pt_order[32];
-	char xunit[32];
-	double xincrement;
-	double xzero;
-	int pt_off;
-	char yunit[32];
-	double ymult;
-	double yoff;
-	double yzero;
-	char domain[32];
-	char wfmtype[32];
-	double centerfreq;
-	double span;
+	bool firstAnalog = true;
 
-	//Ask for the analog data
-	m_transport->SendCommandImmediate("DAT:WID 1");					//8-bit data in NORMAL mode
-	m_transport->SendCommandImmediate("DAT:ENC SRI");				//signed, little endian binary
 	size_t timebase = 0;
 	for(size_t i=0; i<m_analogChannelCount; i++)
 	{
@@ -1381,6 +1420,17 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		{
 			pending_waveforms[i].push_back(NULL);
 			continue;
+		}
+
+		LogDebug("Downloading analog channel %ld\n", i);
+
+		if (firstAnalog)
+		{
+			LogDebug("(Select analog)\n");
+			//Ask for the analog data
+			m_transport->SendCommandImmediate("DAT:WID 1");					//8-bit data in NORMAL mode
+			m_transport->SendCommandImmediate("DAT:ENC SRI");				//signed, little endian binary
+			firstAnalog = false;
 		}
 
 		// Set source & get preamble+data
@@ -1395,50 +1445,18 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// use WAVFRM? instead? but it seems that it may be respected in contradiction to the manual.
 
 		//Ask for the waveform preamble
-		string preamble = m_transport->SendCommandImmediateWithReply("WFMO?", false);
+		string preamble_str = m_transport->SendCommandImmediateWithReply("WFMO?", false);
 
 		// LogDebug("Channel %zu (%s)\n", i, m_channels[i]->GetHwname().c_str());
 		LogIndenter li2;
 
-		size_t semicolons = std::count(preamble.begin(), preamble.end(), ';');
+		struct mso56_preamble preamble;
 
-		int read = 0;
+		if (!ReadPreamble(preamble_str, preamble))
+			return false;
 
-		if (semicolons == 23)
-		{
-			//Process it (grab the whole block, semicolons and all)
-			read = sscanf(preamble.c_str(),
-				"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
-				"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
-				&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
-				xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
-
-			if (read != 22) goto fail_parse;
-		}
-		else if (semicolons == 22)
-		{
-			read = sscanf(preamble.c_str(),
-				"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%d;%c;%31[^;];"
-				"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
-				&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, &nr_pt, pt_fmt, pt_order,
-				xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
-			strcpy(wfid, "<unknown>");
-
-			if (read != 21) goto fail_parse;
-		}
-		else
-		{
-			fail_parse:
-			LogWarning("Preamble error reading channel %zu (%s); skipping (read only %d)\n", i, m_channels[i]->GetHwname().c_str(), read);
-			LogDebug(" -> Failed preamble: %s\n", preamble.c_str());
-			pending_waveforms[i].push_back(NULL);
-			continue;
-		}
-		
-		LogDebug("Preamble: %s\n", preamble.c_str());
-
-		timebase = xincrement * FS_PER_SECOND;	//scope gives sec, not fs
-		m_channelOffsets[i] = -yoff;
+		timebase = preamble.xincrement_or_hzbase * FS_PER_SECOND;	//scope gives sec, not fs
+		m_channelOffsets[i] = -preamble.yoff;
 
 		vector<int8_t*> sample_chunks;
 
@@ -1446,7 +1464,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// Do we need chunking at all if we instead of immediately blocking (and timing out) on the response to a CURV?
 		// and then retrying, if we instead gracefully wait for it to start sending data?
 
-		size_t chunk_size = 1000 * 5000;
+		size_t chunk_size = 1000 * 500;
 		size_t chunks = floor((double)m_sampleDepth / (double)chunk_size) + 1;
 		size_t last_chunk_size = m_sampleDepth - ((chunks-1) * chunk_size);
 
@@ -1456,7 +1474,15 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 		for (size_t chunk = 0; chunk < chunks; chunk++)
 		{
+			int retries = 0;
 			try_again:
+
+			if (retries++ > 3)
+			{
+				LogWarning("Retried too many times. Giving up.\n");
+				return false;
+			}
+
 			bool last_chunk = chunk == chunks - 1;
 			size_t size = last_chunk ? last_chunk_size : chunk_size;
 
@@ -1468,10 +1494,31 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 			size_t start = chunk * chunk_size;
 			size_t stop = start + size;
+
+			reset_start_stop:
 			m_transport->SendCommandImmediate("DATA:START " + to_string(start + 1));
 			m_transport->SendCommandImmediate("DATA:STOP " + to_string(stop));
 
 			LogDebug("Moving chunk %ld / %ld; %ld samples (%ld - %ld)\n", chunk+1, chunks-1, size, start, stop);
+
+			string nr_pt_actual = m_transport->SendCommandImmediateWithReply("WFMOutpre:NR_Pt?", false);
+			LogDebug("NR_Pt? -> '%s'\n", nr_pt_actual.c_str());
+			bool nr_pt_ok = false;
+			try
+			{
+				nr_pt_ok = stoull(nr_pt_actual) == stop - start;
+			}
+			catch (const std::invalid_argument& ia)
+			{
+				LogWarning("NR_Pt? response malformed");
+			}
+
+			if (!nr_pt_ok)
+			{
+				LogWarning("NR_Pt? confused\n");
+				LogError("This almost certainly means you've somehow turned on HORIZ:ROLL mode\n");
+				goto reset_start_stop;
+			}
 
 			//Read the data block
 			size_t nsamples;
@@ -1479,19 +1526,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 			if(samples == NULL)
 			{
-				//Resynchronize
-				LogWarning("Timeout, attempting to recover\n");
-				while(1)
-				{
-					m_transport->SendCommandImmediate("\n*CLS");
-					// The manual has very confusing things to say about this needing to follow an "<EOI>" which
-					// appears to be a holdover from IEEE488 that IDK how is supposed to work (or not) over socket
-					// transport. Who knows. Another option: set Protocol to Terminal in socket server settings and
-					// use '!d' which issues the "DCL (Device CLear) control message" but this means dealing with
-					// prompts and stuff like that.
-					if (IDPing() != "")
-						break;
-				}
+				ResynchronizeSCPI();
 
 				goto try_again;
 			}
@@ -1499,11 +1534,11 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 			if (nsamples != stop - start)
 			{
 				LogWarning("Confused! Chunk %ld expected %ld samples (%ld - %ld) but got %ld\n", i, stop-start, start, stop, nsamples);
-				LogDebug("Actual values returned: ");
-				for (size_t p = 0; p < min(nsamples, (size_t)64); p++)
-					LogDebug("%d/%c ", samples[p], samples[p]);
-				LogDebug("\n");
-				return false;
+				LogWarning("(Did sample depth change under us? Or did we get garbage?)\n");
+
+				ResynchronizeSCPI();
+
+				goto try_again;
 			}
 
 			LogDebug(" -> Yielded %ld samples into *%p\n", nsamples, samples);
@@ -1549,8 +1584,8 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 				(int64_t*)&cap->m_durations[start],
 				(float*)&cap->m_samples[start],
 				sample_chunks[chunk],
-				ymult,
-				-yoff,
+				preamble.ymult,
+				-preamble.yoff,
 				size,
 				0);
 		}
@@ -1578,9 +1613,12 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 			continue;
 		}
 
+		LogDebug("Downloading spectrum channel for analog %ld\n", i);
+
 		//Select mode
 		if(firstSpectrum)
 		{
+			LogDebug(" (Set spectrum download format)\n");
 			m_transport->SendCommandImmediate("DAT:WID 8");					//double precision floating point data
 			m_transport->SendCommandImmediate("DAT:ENC SFPB");				//IEEE754 float
 			firstSpectrum = false;
@@ -1590,20 +1628,17 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		m_transport->SendCommandImmediate(string("DAT:SOU ") + m_channels[i]->GetHwname() + "_SV_NORMAL");
 
 		//Ask for the waveform preamble
-		string preamble = m_transport->SendCommandImmediateWithReply("WFMO?", false);
+		string preamble_str = m_transport->SendCommandImmediateWithReply("WFMO?", false);
 
 		//LogDebug("Channel %zu (%s)\n", nchan, m_channels[nchan]->GetHwname().c_str());
 		//LogIndenter li2;
 
 		//Process it
-		double hzbase = 0;
-		double hzoff = 0;
-		sscanf(preamble.c_str(),
-			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
-			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
-			&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
-			xunit, &hzbase, &hzoff,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
-		m_channelOffsets[i] = -yoff;
+		struct mso56_preamble preamble;
+		if (!ReadPreamble(preamble_str, preamble))
+			return false;
+
+		m_channelOffsets[i] = -preamble.yoff;
 
 		//Read the data block
 		size_t msglen;
@@ -1615,7 +1650,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		//Set up the capture we're going to store our data into
 		//(no TDC data or fine timestamping available on Tektronix scopes?)
 		AnalogWaveform* cap = new AnalogWaveform;
-		cap->m_timescale = hzbase;
+		cap->m_timescale = preamble.xincrement_or_hzbase;
 		cap->m_triggerPhase = 0;
 		cap->m_startTimestamp = time(NULL);
 		cap->m_densePacked = true;
@@ -1625,12 +1660,12 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 		//We get dBm from the instrument, so just have to convert double to single precision
 		//TODO: are other units possible here?
-		int64_t ibase = hzoff / hzbase;
+		int64_t ibase = preamble.xzero_or_hzoff / preamble.xincrement_or_hzbase;
 		for(size_t j=0; j<nsamples; j++)
 		{
 			cap->m_offsets[j] = j + ibase;
 			cap->m_durations[j] = 1;
-			cap->m_samples[j] = ymult*samples[j] + yoff;
+			cap->m_samples[j] = preamble.ymult*samples[j] + preamble.yoff;
 		}
 
 		//Done, update the data
@@ -1693,13 +1728,12 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		m_transport->SendCommandImmediate(string("DAT:SOU CH") + to_string(i+1) + "_DALL");
 
 		//Ask for the waveform preamble
-		string preamble = m_transport->SendCommandImmediateWithReply("WFMO?", false);
-		sscanf(preamble.c_str(),
-			"%d;%d;%31[^;];%31[^;];%31[^;];%31[^;];%255[^;];%d;%c;%31[^;];"
-			"%31[^;];%lf;%lf;%d;%31[^;];%lf;%lf;%lf;%31[^;];%31[^;];%lf;%lf",
-			&byte_num, &bit_num, encoding, bin_format, asc_format, byte_order, wfid, &nr_pt, pt_fmt, pt_order,
-			xunit, &xincrement, &xzero,	&pt_off, yunit, &ymult, &yoff, &yzero, domain, wfmtype, &centerfreq, &span);
-		timebase = xincrement * FS_PER_SECOND;	//scope gives sec, not fs
+		string preamble_str = m_transport->SendCommandImmediateWithReply("WFMO?", false);
+		struct mso56_preamble preamble;
+		if(!ReadPreamble(preamble_str, preamble))
+			return false;
+
+		timebase = preamble.xincrement_or_hzbase * FS_PER_SECOND;	//scope gives sec, not fs
 
 		//And the acutal data
 		size_t msglen;
@@ -2712,6 +2746,10 @@ void TektronixOscilloscope::PushTrigger()
 
 	else
 		LogWarning("Unknown trigger type (not an edge)\n");
+
+	m_transport->SendCommandQueued("TRIG:A:MODE NORMAL");
+	// Do not want the godforsaken auto trigger because this will put us in roll mode
+	// above a certain hdiv, and that screws up the transfer logic
 }
 
 void TektronixOscilloscope::SetTriggerLevelMSO56(Trigger* trig)
