@@ -39,6 +39,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <sys/ioctl.h>
+#include <linux/usb/tmc.h>
+
 #include "scopehal.h"
 
 using namespace std;
@@ -65,6 +68,20 @@ SCPITMCTransport::SCPITMCTransport(const string& args)
 		LogError("Couldn't open %s\n", m_devicePath.c_str());
 		return;
 	}
+
+	uint32_t timeout = 10000;
+	int res = ioctl(m_handle, USBTMC_IOCTL_SET_TIMEOUT, &timeout); // 10 seconds
+	if (res)
+		LogError("ioctl -> %d (errno %d)\n", res, errno);
+	else
+		LogDebug("ioctl success\n");
+
+	timeout = 0;
+	res = ioctl(m_handle, USBTMC_IOCTL_GET_TIMEOUT, &timeout);
+	if (res)
+		LogError("ioctl -> %d (errno %d)\n", res, errno);
+	else
+		LogDebug("ioctl success, timeout now %d\n", timeout);
 
 	// Right now, I'm using an internal staging buffer because this code has been copied from the lxi transport driver.
 	// It's not strictly needed...
@@ -131,10 +148,16 @@ string SCPITMCTransport::ReadReply(bool endOnSemicolon)
 	while(true)
 	{
 		if (m_data_depleted)
+		{
+			LogDebug("Break: data depleted\n");
 			break;
+		}
 		ReadRawData(1, (unsigned char *)&tmp);
 		if( (tmp == '\n') || ( (tmp == ';') && endOnSemicolon ) )
+		{
+			LogDebug("Break: character\n");
 			break;
+		}
 		else
 			ret += tmp;
 	}

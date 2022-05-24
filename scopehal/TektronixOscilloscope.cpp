@@ -1393,7 +1393,7 @@ bool TektronixOscilloscope::ReadPreamble(string& preamble_in, mso56_preamble& pr
 		if (read == 21) return true;
 	}
 	
-	LogWarning("Preamble error (read only %d fields)", read);
+	LogWarning("Preamble error (read only %d fields)\n", read);
 	LogDebug(" -> Failed preamble: %s\n", preamble_in.c_str());
 	return false;
 }
@@ -1464,7 +1464,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		// Do we need chunking at all if we instead of immediately blocking (and timing out) on the response to a CURV?
 		// and then retrying, if we instead gracefully wait for it to start sending data?
 
-		size_t chunk_size = 1000 * 500;
+		size_t chunk_size = 1000 * 500 * 1000;
 		size_t chunks = floor((double)m_sampleDepth / (double)chunk_size) + 1;
 		size_t last_chunk_size = m_sampleDepth - ((chunks-1) * chunk_size);
 
@@ -1495,7 +1495,13 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 			size_t start = chunk * chunk_size;
 			size_t stop = start + size;
 
+			int poll_retries = 0;
 			reset_start_stop:
+			if (poll_retries++ > 20)
+			{
+				LogError("poll_retries too high; giving up\n");
+				return false;
+			}
 			m_transport->SendCommandImmediate("DATA:START " + to_string(start + 1));
 			m_transport->SendCommandImmediate("DATA:STOP " + to_string(stop));
 
