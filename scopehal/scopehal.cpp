@@ -49,6 +49,7 @@
 #include "RohdeSchwarzOscilloscope.h"
 #include "SiglentSCPIOscilloscope.h"
 #include "TektronixOscilloscope.h"
+#include "ThunderScopeOscilloscope.h"
 
 #include "RohdeSchwarzHMC8012Multimeter.h"
 
@@ -397,6 +398,7 @@ void DriverStaticInit()
 	AddDriverClass(LeCroyOscilloscope);
 	AddDriverClass(SiglentSCPIOscilloscope);
 	AddDriverClass(TektronixOscilloscope);
+	AddDriverClass(ThunderScopeOscilloscope);
 
 	AddMultimeterDriverClass(RohdeSchwarzHMC8012Multimeter);
 
