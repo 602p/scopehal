@@ -280,7 +280,7 @@ bool ThunderScopeOscilloscope::AcquireData()
 			if(!m_transport->ReadRawData(sizeof(config), (uint8_t*)&config))
 				return false;
 			float scale = config[0];
-			float offset = config[1] - 1;
+			float offset = config[1];
 			float trigphase = -config[2] * fs_per_sample;
 			scale *= GetChannelAttenuation(chnum);
 			offset *= GetChannelAttenuation(chnum);
