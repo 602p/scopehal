@@ -294,6 +294,17 @@ bool ThunderScopeOscilloscope::AcquireData()
 			if(!m_transport->ReadRawData(memdepth * sizeof(int8_t), (uint8_t*)buf))
 				return false;
 
+			for (int ii = 0; ii < memdepth; ii++)
+			{
+				uint8_t* p = &buf[ii];
+				if (*p > 245)
+				{
+					// SUPER crude temp fix for what appears to be some kind of exceptional near-zero configuration in ThunderScope ADC
+					*p = 0;
+					clipping = 1;
+				}
+			}
+
 			//Create our waveform
 			AnalogWaveform* cap = new AnalogWaveform;
 			cap->m_timescale = fs_per_sample;
