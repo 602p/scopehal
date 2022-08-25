@@ -75,7 +75,7 @@ ThunderScopeOscilloscope::ThunderScopeOscilloscope(SCPITransport* transport)
 
 		//Set initial configuration so we have a well-defined instrument state
 		m_channelAttenuations[i] = 10;
-		SetChannelCoupling(i, OscilloscopeChannel::COUPLE_AC_1M);
+		SetChannelCoupling(i, OscilloscopeChannel::COUPLE_DC_1M);
 		SetChannelOffset(i, 0,  0);
 		SetChannelVoltageRange(i, 0, 5);
 	}
@@ -296,11 +296,9 @@ bool ThunderScopeOscilloscope::AcquireData()
 
 			for (int ii = 0; ii < memdepth; ii++)
 			{
-				uint8_t* p = &buf[ii];
-				if (*p > 245)
+				int8_t* p = (int8_t*)&buf[ii];
+				if ((*p == -128) || (*p == 127))
 				{
-					// SUPER crude temp fix for what appears to be some kind of exceptional near-zero configuration in ThunderScope ADC
-					*p = 0;
 					clipping = 1;
 				}
 			}
@@ -331,11 +329,11 @@ bool ThunderScopeOscilloscope::AcquireData()
 	for(size_t i=0; i<awfms.size(); i++)
 	{
 		auto cap = awfms[i];
-		ConvertUnsigned8BitSamples(
+		Convert8BitSamples(
 			(int64_t*)&cap->m_offsets[0], //FIXME: 0xff sample issue
 			(int64_t*)&cap->m_durations[0],
 			(float*)&cap->m_samples[0],
-			abufs[i],
+			(int8_t*)abufs[i],
 			scales[i],
 			offsets[i],
 			cap->m_offsets.size(),
