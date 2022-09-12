@@ -64,6 +64,7 @@ set(SCOPEPROTOCOLS_SOURCES
 	FFTFilter.cpp
 	FIRFilter.cpp
 	FrequencyMeasurement.cpp
+	PulseWidthMeasurement.cpp
 	FSKDecoder.cpp
 	GroupDelayFilter.cpp
 	HistogramFilter.cpp
@@ -74,6 +75,7 @@ set(SCOPEPROTOCOLS_SOURCES
 	IBISDriverFilter.cpp
 	IBM8b10bDecoder.cpp
 	InvertFilter.cpp
+	ClipFilter.cpp
 	IPv4Decoder.cpp
 	ISIMeasurement.cpp
 	JitterFilter.cpp
