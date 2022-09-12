@@ -99,6 +99,7 @@ void ScopeProtocolStaticInit()
 	AddDecoderClass(FFTFilter);
 	AddDecoderClass(FIRFilter);
 	AddDecoderClass(FrequencyMeasurement);
+	AddDecoderClass(PulseWidthMeasurement);
 	AddDecoderClass(FSKDecoder);
 	AddDecoderClass(GroupDelayFilter);
 	AddDecoderClass(HistogramFilter);
@@ -109,6 +110,7 @@ void ScopeProtocolStaticInit()
 	AddDecoderClass(IBISDriverFilter);
 	AddDecoderClass(IBM8b10bDecoder);
 	AddDecoderClass(InvertFilter);
+	AddDecoderClass(ClipFilter);
 	AddDecoderClass(IPv4Decoder);
 	AddDecoderClass(ISIMeasurement);
 	AddDecoderClass(JitterFilter);
