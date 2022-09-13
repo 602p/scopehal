@@ -36,9 +36,13 @@ using namespace std;
 // Construction / destruction
 
 HistogramFilter::HistogramFilter(const string& color)
-	: Filter(color, CAT_MATH)
+	: Filter(color, CAT_MATH),
+	  m_binCountName("Bin Count (0 -> auto)")
 {
 	AddStream(Unit(Unit::UNIT_COUNTS_SCI), "data", Stream::STREAM_TYPE_ANALOG);
+
+	m_parameters[m_binCountName] = FilterParameter(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS));
+	m_parameters[m_binCountName].SetIntVal(0);
 
 	//Set up channels
 	CreateInput("data");
@@ -89,6 +93,16 @@ float HistogramFilter::GetVoltageRange(size_t /*stream*/)
 float HistogramFilter::GetOffset(size_t /*stream*/)
 {
 	return -m_midpoint;
+}
+
+void HistogramFilter::SetVoltageRange(float range, size_t /*stream*/)
+{
+	m_range = range;
+}
+
+void HistogramFilter::SetOffset(float offset, size_t /*stream*/)
+{
+	m_midpoint = -offset;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -142,9 +156,19 @@ void HistogramFilter::Refresh()
 		reallocate = true;
 	}
 
+	size_t bins = m_parameters[m_binCountName].GetIntVal();
+
+	if (bins == 0)
+	{
+		// "auto" = 100fs per bin target
+		bins = ceil(range) / 100;
+
+		// arbitrary sanity-check bounds
+		if (bins < 1) bins = 1;
+		if (bins > 1000) bins = 1000;
+	}
+
 	//Calculate histogram for our incoming data
-	//For now, 100fs per bin target
-	size_t bins = ceil(range) / 100;
 	auto data = MakeHistogram(sdin, udin, m_min, m_max, bins);
 
 	//Calculate bin configuration.
