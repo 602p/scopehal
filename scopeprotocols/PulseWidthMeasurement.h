@@ -43,7 +43,6 @@ public:
 	virtual void Refresh();
 
 	static std::string GetProtocolName();
-	float GetVoltageRange(size_t /*stream*/);
 
 	virtual bool ValidateChannel(size_t i, StreamDescriptor stream);
 

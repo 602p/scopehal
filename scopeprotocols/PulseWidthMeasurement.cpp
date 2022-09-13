@@ -72,11 +72,6 @@ string PulseWidthMeasurement::GetProtocolName()
 	return "Pulse Width";
 }
 
-float PulseWidthMeasurement::GetVoltageRange(size_t /*stream*/)
-{
-	return 0.25 * FS_PER_SECOND;
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Actual decoder logic
 
@@ -85,7 +80,6 @@ void PulseWidthMeasurement::Refresh()
 	//Make sure we've got valid inputs
 	if(!VerifyAllInputsOK())
 	{
-		LogDebug("Inputs not OK\n");
 		SetData(NULL, 0);
 		return;
 	}
@@ -113,7 +107,6 @@ void PulseWidthMeasurement::Refresh()
 	//We need at least one full cycle of the waveform to have a meaningful frequency
 	if(edges.size() < 2)
 	{
-		LogDebug("Not enough edges\n");
 		SetData(NULL, 0);
 		return;
 	}
@@ -124,7 +117,6 @@ void PulseWidthMeasurement::Refresh()
 	cap->PrepareForCpuAccess();
 
 	size_t elen = edges.size();
-	LogDebug("Looking through %ld edges...", elen);
 	for(size_t i=0; i < (elen - 2); i+= 2)
 	{
 		//measure from edge to 2 edges later, since we find all zero crossings regardless of polarity
@@ -137,8 +129,6 @@ void PulseWidthMeasurement::Refresh()
 		cap->m_durations.push_back(delta);
 		cap->m_samples.push_back(delta);
 	}
-
-	LogDebug("Done\n");
 
 	SetData(cap, 0);
 
