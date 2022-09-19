@@ -40,6 +40,12 @@ ClipFilter::ClipFilter(const string& color)
 {
 	AddStream(Unit(Unit::UNIT_VOLTS), "data", Stream::STREAM_TYPE_ANALOG);
 	CreateInput("din");
+
+	m_parameters[m_clipAboveName] = FilterParameter(FilterParameter::TYPE_BOOL, Unit(Unit::UNIT_COUNTS));
+	m_parameters[m_clipAboveName].SetBoolVal(0);
+
+	m_parameters[m_clipLevelName] = FilterParameter(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_VOLTS));
+	m_parameters[m_clipLevelName].SetFloatVal(0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -82,6 +88,9 @@ void ClipFilter::Refresh()
 	auto udin = dynamic_cast<UniformAnalogWaveform*>(din);
 	auto sdin = dynamic_cast<SparseAnalogWaveform*>(din);
 
+	bool clipAbove = m_parameters[m_clipAboveName].GetIntVal();
+	float clipLevel = m_parameters[m_clipLevelName].GetFloatVal();
+
 	if(sdin)
 	{
 		//Negate each sample
@@ -92,7 +101,14 @@ void ClipFilter::Refresh()
 		for(size_t i=0; i<len; i++)
 		{
 			float d = a[i];
-			out[i] = d>0 ? d : 0;
+
+			if (( clipAbove && d > clipLevel) ||
+				(!clipAbove && d < clipLevel))
+			{
+				d = clipLevel;
+			}
+
+			out[i] = d;
 		}
 
 		cap->MarkModifiedFromCpu();
@@ -108,7 +124,14 @@ void ClipFilter::Refresh()
 		for(size_t i=0; i<len; i++)
 		{
 			float d = a[i];
-			out[i] = d>0 ? d : 0;
+			
+			if (( clipAbove && d > clipLevel) ||
+				(!clipAbove && d < clipLevel))
+			{
+				d = clipLevel;
+			}
+			
+			out[i] = d;
 		}
 
 		cap->MarkModifiedFromCpu();
