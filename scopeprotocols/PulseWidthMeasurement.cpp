@@ -38,7 +38,7 @@ using namespace std;
 PulseWidthMeasurement::PulseWidthMeasurement(const string& color)
 	: Filter(color, CAT_MEASUREMENT)
 {
-	AddStream(Unit(Unit::UNIT_FS), "data", Stream::STREAM_TYPE_ANALOG);
+	AddStream(Unit(Unit::UNIT_FS), "data", Stream::STREAM_TYPE_ANALOG, Stream::STREAM_DO_NOT_INTERPOLATE);
 
 	//Set up channels
 	CreateInput("din");
