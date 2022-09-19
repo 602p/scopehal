@@ -185,6 +185,9 @@ target_link_libraries(scopehal
 	${LIBFFTS_LIBRARIES}
 	${OpenMP_CXX_LIBRARIES}
 	${Vulkan_LIBRARIES}
+	SPIRV
+	SPIRV-Tools-opt
+	SPIRV-Tools
 	Vulkan::Vulkan
 	Vulkan::glslang
 	Vulkan::shaderc_combined
