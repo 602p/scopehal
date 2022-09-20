@@ -37,12 +37,16 @@ using namespace std;
 
 ClipFilter::ClipFilter(const string& color)
 	: Filter(color, CAT_MATH)
+	, m_clipAboveName("Behavior")
+	, m_clipLevelName("Level")
 {
 	AddStream(Unit(Unit::UNIT_VOLTS), "data", Stream::STREAM_TYPE_ANALOG);
 	CreateInput("din");
 
-	m_parameters[m_clipAboveName] = FilterParameter(FilterParameter::TYPE_BOOL, Unit(Unit::UNIT_COUNTS));
-	m_parameters[m_clipAboveName].SetBoolVal(0);
+	m_parameters[m_clipAboveName] = FilterParameter(FilterParameter::TYPE_ENUM, Unit(Unit::UNIT_COUNTS));
+	m_parameters[m_clipAboveName].AddEnumValue("Clip Above", 1);
+	m_parameters[m_clipAboveName].AddEnumValue("Clip Below", 0);
+	m_parameters[m_clipAboveName].SetIntVal(0);
 
 	m_parameters[m_clipLevelName] = FilterParameter(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_VOLTS));
 	m_parameters[m_clipLevelName].SetFloatVal(0);
