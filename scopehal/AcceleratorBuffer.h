@@ -388,6 +388,9 @@ public:
 	T* GetCpuPointer()
 	{ return m_cpuPtr; }
 
+	const T* GetConstCpuPointer() const
+	{ return m_cpuPtr; }
+
 	/**
 		@brief Returns a vk::DescriptorBufferInfo suitable for binding this object to
 	 */

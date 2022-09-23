@@ -76,6 +76,7 @@ set(SCOPEPROTOCOLS_SOURCES
 	IBM8b10bDecoder.cpp
 	InvertFilter.cpp
 	ClipFilter.cpp
+	WaveformSubsetSelectionFilter.cpp
 	IPv4Decoder.cpp
 	ISIMeasurement.cpp
 	JitterFilter.cpp

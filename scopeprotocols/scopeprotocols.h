@@ -112,6 +112,7 @@
 #include "IBISDriverFilter.h"
 #include "InvertFilter.h"
 #include "ClipFilter.h"
+#include "WaveformSubsetSelectionFilter.h"
 #include "IPv4Decoder.h"
 #include "ISIMeasurement.h"
 #include "JitterFilter.h"

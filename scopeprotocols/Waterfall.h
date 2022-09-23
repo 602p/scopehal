@@ -76,6 +76,12 @@ public:
 	virtual size_t size() const
 	{ return 0; }
 
+	virtual uint8_t* GetSamplesBuffer()
+	{ return nullptr; }
+
+	virtual size_t GetSampleSize()
+	{ return 0; }
+
 protected:
 	size_t m_width;
 	size_t m_height;

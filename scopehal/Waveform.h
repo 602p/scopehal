@@ -145,6 +145,9 @@ public:
 	virtual void MarkSamplesModifiedFromCpu() =0;
 	virtual void MarkSamplesModifiedFromGpu() =0;
 
+	virtual uint8_t* GetSamplesBuffer() =0;
+	virtual size_t GetSampleSize() =0;
+
 	virtual void MarkModifiedFromCpu() =0;
 	virtual void MarkModifiedFromGpu() =0;
 };
@@ -290,6 +293,12 @@ public:
 
 	void SetGpuAccessHint(enum AcceleratorBuffer<S>::UsageHint hint)
 	{ m_samples.SetGpuAccessHint(hint); }
+
+	virtual uint8_t* GetSamplesBuffer()
+	{ return (uint8_t*)&m_samples[0]; }
+
+	virtual size_t GetSampleSize()
+	{ return sizeof(S); }
 };
 
 /**
@@ -379,6 +388,12 @@ public:
 		m_durations.SetGpuAccessHint(static_cast<AcceleratorBuffer<int64_t>::UsageHint>(hint));
 		m_samples.SetGpuAccessHint(hint);
 	}
+
+	virtual uint8_t* GetSamplesBuffer()
+	{ return (uint8_t*)&m_samples[0]; }
+
+	virtual size_t GetSampleSize()
+	{ return sizeof(S); }
 };
 
 typedef SparseWaveform<bool> 					SparseDigitalWaveform;
@@ -435,6 +450,121 @@ int64_t GetOffsetScaled(T* wfm, size_t i)
 template<class T>
 int64_t GetDurationScaled(T* wfm, size_t i)
 { return GetDuration(wfm, i) * wfm->m_timescale; }
+
+static int64_t GetOffsetScaled(WaveformBase* wfm, size_t i)
+{
+	if (auto s = dynamic_cast<SparseWaveformBase*>(wfm))
+		return GetOffsetScaled(s, i);
+	else if (auto u = dynamic_cast<UniformWaveformBase*>(wfm))
+		return GetOffsetScaled(u, i);
+}
+
+static int64_t GetDurationScaled(WaveformBase* wfm, size_t i)
+{
+	if (auto s = dynamic_cast<SparseWaveformBase*>(wfm))
+		return GetDurationScaled(s, i);
+	else if (auto u = dynamic_cast<UniformWaveformBase*>(wfm))
+		return GetDurationScaled(u, i);
+}
+
+static int GetIndexNearestAfterTimestamp(const UniformWaveformBase* wfm, int64_t timestamp)
+{
+	timestamp -= wfm->m_triggerPhase;
+	if (timestamp < 0)
+		return -1;
+
+	timestamp /= wfm->m_timescale;
+
+	if (timestamp >= (int64_t)wfm->size())
+		return -1;
+
+	return timestamp;
+}
+
+template<class T>
+static size_t BinarySearchForGequal(const T* buf, size_t len, T value)
+{
+	size_t pos = len/2;
+	size_t last_lo = 0;
+	size_t last_hi = len-1;
+
+	//Clip if out of range
+	if(buf[0] >= value)
+		return 0;
+	if(buf[last_hi] < value)
+		return len-1;
+
+	while(true)
+	{
+		LogIndenter li;
+
+		//Stop if we've bracketed the target
+		if( (last_hi - last_lo) <= 1)
+			break;
+
+		//Move down
+		if(buf[pos] > value)
+		{
+			size_t delta = pos - last_lo;
+			last_hi = pos;
+			pos = last_lo + delta/2;
+		}
+
+		//Move up
+		else
+		{
+			size_t delta = last_hi - pos;
+			last_lo = pos;
+			pos = last_hi - delta/2;
+		}
+	}
+
+	return last_lo;
+}
+
+
+// TODO: Replace use in WaveformArea_cairo with this.
+static int GetIndexNearestAfterTimestamp(const SparseWaveformBase* wfm, int64_t timestamp)
+{
+	double ticks = 1.0f * (timestamp - wfm->m_triggerPhase)  / wfm->m_timescale;
+
+	//Find the approximate index of the sample of interest and interpolate the cursor position
+	int64_t target = ceil(ticks);
+
+	int index = BinarySearchForGequal(
+		wfm->m_offsets.GetConstCpuPointer(),
+		wfm->size(),
+		target);
+
+	if (index < 0)
+		index = -1;
+	if (index >= (int)wfm->size())
+		index = -1;
+
+	return index;
+}
+
+static int GetIndexNearestAfterTimestamp(const WaveformBase* wfm, int64_t timestamp)
+{
+	auto s = dynamic_cast<const SparseWaveformBase*>(wfm);
+	auto d = dynamic_cast<const UniformWaveformBase*>(wfm);
+
+	if (s)
+	{
+		return GetIndexNearestAfterTimestamp(s, timestamp);
+	}
+	else if (d)
+	{
+		return GetIndexNearestAfterTimestamp(d, timestamp);
+	}
+	else
+	{
+		LogFatal("Unknown waveform type");
+		return -1;
+	}
+}
+
+#define GetAlignedSamplesPointer(wfm) ((uint8_t*)__builtin_assume_aligned(wfm->GetSamplesBuffer(), 16))
 
 /**
 	@brief Helper for calling GetOffset() on a waveform which may be sparse or uniform

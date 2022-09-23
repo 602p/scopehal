@@ -112,6 +112,7 @@ void ScopeProtocolStaticInit()
 	AddDecoderClass(IBM8b10bDecoder);
 	AddDecoderClass(InvertFilter);
 	AddDecoderClass(ClipFilter);
+	AddDecoderClass(WaveformSubsetSelectionFilter);
 	AddDecoderClass(IPv4Decoder);
 	AddDecoderClass(ISIMeasurement);
 	AddDecoderClass(JitterFilter);

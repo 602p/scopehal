@@ -30,140 +30,27 @@
 /**
 	@file
 	@author Andrew D. Zonenberg
-	@brief Declaration of SpectrogramFilter
+	@brief Declaration of WaveformSubsetSelectionFilter
  */
-#ifndef SpectrogramFilter_h
-#define SpectrogramFilter_h
+#ifndef WaveformSubsetSelectionFilter_h
+#define WaveformSubsetSelectionFilter_h
 
-#include <ffts.h>
-
-class SpectrogramWaveform : public WaveformBase
+class WaveformSubsetSelectionFilter : public Filter
 {
 public:
-	SpectrogramWaveform(size_t width, size_t height, float fmax, int64_t tstart, int64_t duration);
-	virtual ~SpectrogramWaveform();
-
-	//not copyable or assignable
-	SpectrogramWaveform(const SpectrogramWaveform&) =delete;
-	SpectrogramWaveform& operator=(const SpectrogramWaveform&) =delete;
-
-	float* GetData()
-	{ return m_data; }
-
-	size_t GetHeight()
-	{ return m_height; }
-
-	size_t GetWidth()
-	{ return m_width; }
-
-	float GetMaxFrequency()
-	{ return m_fmax; }
-
-	int64_t GetStartTime()
-	{ return m_tstart; }
-
-	int64_t GetDuration()
-	{ return m_duration; }
-
-	//Unused virtual methods from WaveformBase that we have to override
-	virtual void clear()
-	{}
-
-	virtual void Resize(size_t /*unused*/)
-	{}
-
-	virtual void PrepareForCpuAccess()
-	{}
-
-	virtual void PrepareForGpuAccess()
-	{}
-
-	virtual void MarkSamplesModifiedFromCpu()
-	{}
-
-	virtual void MarkSamplesModifiedFromGpu()
-	{}
-
-	virtual void MarkModifiedFromCpu()
-	{}
-
-	virtual void MarkModifiedFromGpu()
-	{}
-
-	virtual size_t size() const
-	{ return 0; }
-
-	virtual uint8_t* GetSamplesBuffer()
-	{ return nullptr; }
-
-	virtual size_t GetSampleSize()
-	{ return 0; }
-
-protected:
-	size_t m_width;
-	size_t m_height;
-	float m_fmax;
-	int64_t m_tstart;
-	int64_t m_duration;
-
-	float* m_data;
-};
-
-class SpectrogramFilter : public Filter
-{
-public:
-	SpectrogramFilter(const std::string& color);
-	virtual ~SpectrogramFilter();
+	WaveformSubsetSelectionFilter(const std::string& color);
 
 	virtual void Refresh();
 
 	static std::string GetProtocolName();
 
-	virtual float GetVoltageRange(size_t stream);
-	virtual float GetOffset(size_t stream);
 	virtual bool ValidateChannel(size_t i, StreamDescriptor stream);
 
-	virtual void SetVoltageRange(float range, size_t stream);
-	virtual void SetOffset(float offset, size_t stream);
-
-	PROTOCOL_DECODER_INITPROC(SpectrogramFilter)
+	PROTOCOL_DECODER_INITPROC(WaveformSubsetSelectionFilter)
 
 protected:
-	void ReallocateBuffers(size_t fftlen);
-
-	std::vector<float, AlignedAllocator<float, 64> > m_rdinbuf;
-	std::vector<float, AlignedAllocator<float, 64> > m_rdoutbuf;
-
-	void ProcessSpectrumGeneric(
-		size_t nblocks,
-		size_t block,
-		size_t nouts,
-		float minscale,
-		float range,
-		float scale,
-		float* data);
-
-#ifdef __x86_64__
-	void ProcessSpectrumAVX2FMA(
-		size_t nblocks,
-		size_t block,
-		size_t nouts,
-		float minscale,
-		float range,
-		float scale,
-		float* data);
-#endif
-
-	size_t m_cachedFFTLength;
-
-	ffts_plan_t* m_plan;
-	float m_range;
-	float m_offset;
-
-	std::string m_windowName;
-	std::string m_fftLengthName;
-	std::string m_rangeMinName;
-	std::string m_rangeMaxName;
+	std::string m_startTimeName;
+	std::string m_durationName;
 };
 
 #endif
