@@ -94,6 +94,8 @@ public:
 protected:
 	OscilloscopeChannel* m_extTrigChannel;
 
+	SCPISocketTransport* m_secondSocket;
+
 	//Mutexing for thread safety
 	std::recursive_mutex m_cacheMutex;
 
