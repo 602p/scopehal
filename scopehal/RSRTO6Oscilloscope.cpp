@@ -99,14 +99,14 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 		chan->SetDefaultDisplayName();
 
 		// //Request all points when we download
-		// m_transport->SendCommand(chname + ":DATA:POIN MAX");
+		// m_transport->SendCommandQueued(chname + ":DATA:POIN MAX");
 	}
 	m_analogChannelCount = nchans;
 
-	m_transport->SendCommand("FORMat:DATA REAL,32");
-	m_transport->SendCommand("ACQuire:COUNt 1");
-	m_transport->SendCommand("EXPort:WAVeform:INCXvalues OFF");
-	m_transport->SendCommand("*WAI");
+	m_transport->SendCommandQueued("FORMat:DATA REAL,32");
+	m_transport->SendCommandQueued("ACQuire:COUNt 1");
+	m_transport->SendCommandQueued("EXPort:WAVeform:INCXvalues OFF");
+	m_transport->SendCommandQueued("*WAI");
 }
 
 RSRTO6Oscilloscope::~RSRTO6Oscilloscope()
@@ -177,10 +177,9 @@ OscilloscopeChannel::CouplingType RSRTO6Oscilloscope::GetChannelCoupling(size_t 
 
 	string reply;
 	{
-		lock_guard<recursive_mutex> lock(m_mutex);
+		// lock_guard<recursive_mutex> lock(m_mutex);
 
-		m_transport->SendCommand(m_channels[i]->GetHwname() + ":COUP?");
-		reply = m_transport->ReadReply();
+		reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":COUP?");
 	}
 	OscilloscopeChannel::CouplingType coupling;
 
@@ -204,19 +203,19 @@ OscilloscopeChannel::CouplingType RSRTO6Oscilloscope::GetChannelCoupling(size_t 
 void RSRTO6Oscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel::CouplingType type)
 {
 	{
-		lock_guard<recursive_mutex> lock(m_mutex);
+		// lock_guard<recursive_mutex> lock(m_mutex);
 		switch(type)
 		{
 			case OscilloscopeChannel::COUPLE_DC_50:
-				m_transport->SendCommand(m_channels[i]->GetHwname() + ":COUP DC");
+				m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":COUP DC");
 				break;
 
 			case OscilloscopeChannel::COUPLE_AC_1M:
-				m_transport->SendCommand(m_channels[i]->GetHwname() + ":COUP AC");
+				m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":COUP AC");
 				break;
 
 			case OscilloscopeChannel::COUPLE_DC_1M:
-				m_transport->SendCommand(m_channels[i]->GetHwname() + ":COUP DCLimit");
+				m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":COUP DCLimit");
 				break;
 
 			default:
@@ -270,11 +269,10 @@ float RSRTO6Oscilloscope::GetChannelVoltageRange(size_t i, size_t /*stream*/)
 			return m_channelVoltageRanges[i];
 	}
 
-	lock_guard<recursive_mutex> lock2(m_mutex);
+	// lock_guard<recursive_mutex> lock2(m_mutex);
 
-	m_transport->SendCommand(m_channels[i]->GetHwname() + ":RANGE?");
+	string reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":RANGE?");
 
-	string reply = m_transport->ReadReply();
 	float range;
 	sscanf(reply.c_str(), "%f", &range);
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -289,10 +287,10 @@ void RSRTO6Oscilloscope::SetChannelVoltageRange(size_t i, size_t /*stream*/, flo
 		m_channelVoltageRanges[i] = range;
 	}
 
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	char cmd[128];
 	snprintf(cmd, sizeof(cmd), "%s:RANGE %.4f", m_channels[i]->GetHwname().c_str(), range);
-	m_transport->SendCommand(cmd);
+	m_transport->SendCommandQueued(cmd);
 }
 
 OscilloscopeChannel* RSRTO6Oscilloscope::GetExternalTrigger()
@@ -311,11 +309,10 @@ float RSRTO6Oscilloscope::GetChannelOffset(size_t i, size_t /*stream*/)
 			return m_channelOffsets[i];
 	}
 
-	lock_guard<recursive_mutex> lock2(m_mutex);
+	// lock_guard<recursive_mutex> lock2(m_mutex);
 
-	m_transport->SendCommand(m_channels[i]->GetHwname() + ":OFFS?");
+	string reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":OFFS?");
 
-	string reply = m_transport->ReadReply();
 	float offset;
 	sscanf(reply.c_str(), "%f", &offset);
 	offset = -offset;
@@ -331,21 +328,20 @@ void RSRTO6Oscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float off
 		m_channelOffsets[i] = offset;
 	}
 
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	char cmd[128];
 	snprintf(cmd, sizeof(cmd), "%s:OFFS %.4f", m_channels[i]->GetHwname().c_str(), -offset);
-	m_transport->SendCommand(cmd);
+	m_transport->SendCommandQueued(cmd);
 }
 
 Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 {
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	if (!m_triggerArmed)
 		return TRIGGER_MODE_STOP;
 
 	////////////////////////////////////////////////////////////////////////////
-	m_transport->SendCommand("ACQuire:CURRent?");
-	string state = m_transport->ReadReply();
+	string state = m_transport->SendCommandQueuedWithReply("ACQuire:CURRent?");
 
 	if (state == "0")
 	{
@@ -366,11 +362,12 @@ Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 bool RSRTO6Oscilloscope::AcquireData()
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
+	lock_guard<recursive_mutex> lock2(m_transport->GetMutex());
 	LogDebug(" ** AcquireData ** \n");
 
 	auto start_time = std::chrono::system_clock::now();
 
-	// m_transport->SendCommand("*DCL; *WAI");
+	// m_transport->SendCommandQueued("*DCL; *WAI");
 
 	LogIndenter li;
 
@@ -383,8 +380,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 			continue;
 
 		//This is basically the same function as a LeCroy WAVEDESC, but much less detailed
-		m_transport->SendCommand(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
-		string reply = m_transport->ReadReply();
+		string reply = m_transport->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
 
 		double xstart;
 		double xstop;
@@ -419,57 +415,26 @@ bool RSRTO6Oscilloscope::AcquireData()
 		cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
 
 		//Ask for the data
-		m_transport->SendCommand(m_channels[i]->GetHwname() + ":DATA?; *WAI");
+		size_t len_bytes;
+		float* samples = (float*)m_transport->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?; *WAI", len_bytes);
 
-		////////////////////////////////////////////////////////////////////////
-		// //Read length header
-		// char tmp[16] = {0};
-		// m_transport->ReadRawData(2, (unsigned char*)tmp);
-
-		// if (!((tmp[0] == '#') && tmp[1] == '('))
-		// {
-		// 	LogWarning("Bad DATA response -- #( : %c%c\n", tmp[0], tmp[1]);
-		// 	continue;
-		// }
-
-		// while (1)
-		// {
-		// 	m_transport->ReadRawData(1, (unsigned char*)tmp);
-
-		// 	if (tmp[0] == ')')
-		// 		break;
-
-		// 	if (!((tmp[0] >= '0') && (tmp[0] <= '9')))
-		// 	{
-		// 		LogWarning("Bad DATA response -- digit\n");
-		// 		return false;
-		// 	}
-		// }
-		////////////////////////////////////////////////////////////////////////
-
-		//Read length header
-		char tmp[16] = {0};
-		m_transport->ReadRawData(2, (unsigned char*)tmp);
-
-		if (!((tmp[0] == '#') && (tmp[1] >= '0') && (tmp[1] <= '9')))
+		if (len_bytes != (length*sizeof(float)))
 		{
-			LogWarning("Bad DATA response -- #X : %c%c\n", tmp[0], tmp[1]);
-			continue;
+			LogFatal("Unexpected number of bytes back");
 		}
-
-		m_transport->ReadRawData(tmp[1] - '0', (unsigned char*)tmp);
-
-		LogDebug("Read len; now reading %ld bytes\n", length*sizeof(float));
 
 		//Read the actual data.
 		//Super easy, it comes across the wire in IEEE754 already!
 		cap->Resize(length);
 		cap->PrepareForCpuAccess();
-		m_transport->ReadRawData(length*sizeof(float), (unsigned char*)cap->m_samples.GetCpuPointer());
+		memcpy((unsigned char*)cap->m_samples.GetCpuPointer(), samples, len_bytes);
 		cap->MarkSamplesModifiedFromCpu();
 
+		delete[] samples;
+
 		//Discard trailing newline
-		m_transport->ReadRawData(1, (unsigned char*)tmp);
+		uint8_t disregard;
+		m_transport->ReadRawData(1, &disregard);
 
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
@@ -498,7 +463,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 	if(!any_data || !m_triggerOneShot)
 	{
-		m_transport->SendCommand("SINGle");
+		m_transport->SendCommandImmediate("SINGle");
 		usleep(100000);
 		// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 		m_triggerArmed = true;
@@ -513,9 +478,9 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 void RSRTO6Oscilloscope::Start()
 {
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start");
-	m_transport->SendCommand("SINGle");
+	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
@@ -524,9 +489,9 @@ void RSRTO6Oscilloscope::Start()
 
 void RSRTO6Oscilloscope::StartSingleTrigger()
 {
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start oneshot");
-	m_transport->SendCommand("SINGle");
+	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
@@ -535,9 +500,9 @@ void RSRTO6Oscilloscope::StartSingleTrigger()
 
 void RSRTO6Oscilloscope::Stop()
 {
-	lock_guard<recursive_mutex> lock(m_mutex);
+	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Stop!");
-	m_transport->SendCommand("STOP");
+	m_transport->SendCommandImmediate("STOP");
 	m_triggerArmed = false;
 	m_triggerOneShot = true;
 }
