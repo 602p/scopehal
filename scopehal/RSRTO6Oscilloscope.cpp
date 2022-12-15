@@ -55,8 +55,19 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	LogDebug("m_model: %s\n", m_model.c_str());
 	if (m_model != "RTO6")
 	{
-		LogFatal("rs.rto6 driver only appropriate for RTO6\n");
+		LogFatal("rs.rto6 driver only appropriate for RTO6");
 	}
+
+	SCPISocketTransport* sockettransport = NULL;
+
+	if (!(sockettransport = dynamic_cast<SCPISocketTransport*>(transport)))
+	{
+		LogFatal("rs.rto6 driver requires 'lan' transport");
+	}
+
+	m_secondSocket = new SCPISocketTransport(sockettransport->GetHostname(), sockettransport->GetPort());
+	string idn2 = m_secondSocket->SendCommandImmediateWithReply("*IDN?");
+	LogDebug("idn2: %s\n", idn2.c_str());
 
 	int nchans = 4;
 	for(int i=0; i<nchans; i++)
@@ -336,33 +347,35 @@ void RSRTO6Oscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float off
 
 Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 {
-	// lock_guard<recursive_mutex> lock(m_mutex);
-	if (!m_triggerArmed)
-		return TRIGGER_MODE_STOP;
+	// // lock_guard<recursive_mutex> lock(m_mutex);
+	// if (!m_triggerArmed)
+	// 	return TRIGGER_MODE_STOP;
 
-	////////////////////////////////////////////////////////////////////////////
-	string state = m_transport->SendCommandQueuedWithReply("ACQuire:CURRent?");
+	// ////////////////////////////////////////////////////////////////////////////
+	// string state = m_transport->SendCommandQueuedWithReply("ACQuire:CURRent?");
 
-	if (state == "0")
-	{
-		return TRIGGER_MODE_RUN;
-	}
-	else if (state == "1")
-	{
-		m_triggerArmed = false;
-		return TRIGGER_MODE_TRIGGERED;
-	}
-	else
-	{
-		LogWarning("ACQuire:CURRent? -> %s\n", state.c_str());
-		return TRIGGER_MODE_TRIGGERED;
-	}
+	// if (state == "0")
+	// {
+	// 	return TRIGGER_MODE_RUN;
+	// }
+	// else if (state == "1")
+	// {
+	// 	m_triggerArmed = false;
+	// 	return TRIGGER_MODE_TRIGGERED;
+	// }
+	// else
+	// {
+	// 	LogWarning("ACQuire:CURRent? -> %s\n", state.c_str());
+	// 	return TRIGGER_MODE_TRIGGERED;
+	// }
+
+	return m_triggerArmed ? TRIGGER_MODE_TRIGGERED : TRIGGER_MODE_STOP;
 }
 
 bool RSRTO6Oscilloscope::AcquireData()
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
-	lock_guard<recursive_mutex> lock2(m_transport->GetMutex());
+	m_transport->FlushCommandQueue();
 	LogDebug(" ** AcquireData ** \n");
 
 	auto start_time = std::chrono::system_clock::now();
@@ -380,7 +393,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 			continue;
 
 		//This is basically the same function as a LeCroy WAVEDESC, but much less detailed
-		string reply = m_transport->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
+		string reply = m_secondSocket->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
 
 		double xstart;
 		double xstop;
@@ -416,7 +429,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 		//Ask for the data
 		size_t len_bytes;
-		float* samples = (float*)m_transport->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?; *WAI", len_bytes);
+		float* samples = (float*)m_secondSocket->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?; *WAI", len_bytes);
 
 		if (len_bytes != (length*sizeof(float)))
 		{
@@ -434,7 +447,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 		//Discard trailing newline
 		uint8_t disregard;
-		m_transport->ReadRawData(1, &disregard);
+		m_secondSocket->ReadRawData(1, &disregard);
 
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
@@ -461,12 +474,16 @@ bool RSRTO6Oscilloscope::AcquireData()
 		m_pendingWaveformsMutex.unlock();
 	}
 
-	if(!any_data || !m_triggerOneShot)
+	if(!any_data || (m_triggerArmed && !m_triggerOneShot))
 	{
-		m_transport->SendCommandImmediate("SINGle");
-		usleep(100000);
+		m_secondSocket->SendCommandImmediate("SINGle; *WAI");
+		// usleep(100000);
 		// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 		m_triggerArmed = true;
+	}
+	else
+	{
+		m_triggerArmed = false;
 	}
 
 	auto end_time = std::chrono::system_clock::now();
@@ -480,8 +497,8 @@ void RSRTO6Oscilloscope::Start()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start");
-	m_transport->SendCommandImmediate("SINGle");
-	usleep(100000);
+	m_secondSocket->SendCommandImmediate("SINGle; *WAI");
+	// usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
 	m_triggerOneShot = false;
@@ -491,8 +508,8 @@ void RSRTO6Oscilloscope::StartSingleTrigger()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start oneshot");
-	m_transport->SendCommandImmediate("SINGle");
-	usleep(100000);
+	m_secondSocket->SendCommandImmediate("SINGle; *WAI");
+	// usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
 	m_triggerOneShot = true;
@@ -500,9 +517,11 @@ void RSRTO6Oscilloscope::StartSingleTrigger()
 
 void RSRTO6Oscilloscope::Stop()
 {
+	m_triggerArmed = false;
+
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Stop!");
-	m_transport->SendCommandImmediate("STOP");
+	m_secondSocket->SendCommandImmediate("STOP");
 	m_triggerArmed = false;
 	m_triggerOneShot = true;
 }
