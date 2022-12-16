@@ -112,6 +112,11 @@ protected:
 	bool m_triggerArmed;
 	bool m_triggerOneShot;
 
+	bool m_sampleRateValid;
+	uint64_t m_sampleRate;
+	bool m_sampleDepthValid;
+	uint64_t m_sampleDepth;
+
 	void PullEdgeTrigger();
 	void PushEdgeTrigger(EdgeTrigger* trig);
 

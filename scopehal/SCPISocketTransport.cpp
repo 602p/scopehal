@@ -78,7 +78,7 @@ void SCPISocketTransport::SharedCtorInit()
 		LogError("Couldn't connect to socket\n");
 		return;
 	}
-	if(!m_socket.SetRxTimeout(5000000))
+	if(!m_socket.SetRxTimeout(50000000))
 		LogWarning("No Rx timeout: %s\n", strerror(errno));
 	if(!m_socket.SetTxTimeout(5000000))
 		LogWarning("No Tx timeout: %s\n", strerror(errno));

@@ -51,6 +51,8 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	, SCPIInstrument(transport)
 	, m_triggerArmed(false)
 	, m_triggerOneShot(false)
+	, m_sampleRateValid(false)
+	, m_sampleDepthValid(false)
 {
 	LogDebug("m_model: %s\n", m_model.c_str());
 	if (m_model != "RTO6")
@@ -117,7 +119,11 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	m_transport->SendCommandQueued("FORMat:DATA REAL,32");
 	m_transport->SendCommandQueued("ACQuire:COUNt 1");
 	m_transport->SendCommandQueued("EXPort:WAVeform:INCXvalues OFF");
+	m_transport->SendCommandQueued("TIMebase:ROLL:ENABle OFF");
+	m_transport->SendCommandQueued("TRIGGER1:MODE NORMAL");
 	m_transport->SendCommandQueued("*WAI");
+
+	GetSampleDepth();
 }
 
 RSRTO6Oscilloscope::~RSRTO6Oscilloscope()
@@ -347,29 +353,27 @@ void RSRTO6Oscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float off
 
 Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 {
-	// // lock_guard<recursive_mutex> lock(m_mutex);
-	// if (!m_triggerArmed)
-	// 	return TRIGGER_MODE_STOP;
+	// lock_guard<recursive_mutex> lock(m_mutex);
+	if (!m_triggerArmed)
+		return TRIGGER_MODE_STOP;
 
-	// ////////////////////////////////////////////////////////////////////////////
-	// string state = m_transport->SendCommandQueuedWithReply("ACQuire:CURRent?");
+	////////////////////////////////////////////////////////////////////////////
+	string state = m_transport->SendCommandQueuedWithReply("ACQuire:CURRent?");
 
-	// if (state == "0")
-	// {
-	// 	return TRIGGER_MODE_RUN;
-	// }
-	// else if (state == "1")
-	// {
-	// 	m_triggerArmed = false;
-	// 	return TRIGGER_MODE_TRIGGERED;
-	// }
-	// else
-	// {
-	// 	LogWarning("ACQuire:CURRent? -> %s\n", state.c_str());
-	// 	return TRIGGER_MODE_TRIGGERED;
-	// }
+	if (state == "0")
+	{
+		return TRIGGER_MODE_RUN;
+	}
+	else
+	{
+		if (state != "1")
+			LogWarning("ACQuire:CURRent? -> %s\n", state.c_str());
 
-	return m_triggerArmed ? TRIGGER_MODE_TRIGGERED : TRIGGER_MODE_STOP;
+		m_triggerArmed = false;
+		return TRIGGER_MODE_TRIGGERED;
+	}
+
+	// return m_triggerArmed ? TRIGGER_MODE_TRIGGERED : TRIGGER_MODE_STOP;
 }
 
 bool RSRTO6Oscilloscope::AcquireData()
@@ -377,6 +381,8 @@ bool RSRTO6Oscilloscope::AcquireData()
 	lock_guard<recursive_mutex> lock(m_mutex);
 	m_transport->FlushCommandQueue();
 	LogDebug(" ** AcquireData ** \n");
+
+	GetSampleDepth();
 
 	auto start_time = std::chrono::system_clock::now();
 
@@ -411,13 +417,22 @@ bool RSRTO6Oscilloscope::AcquireData()
 		}
 		any_data = true;
 
+		// ACQUIRE:POINTS? to query rec len
+		// length = 250e6;
+
 		//Figure out the sample rate
 		double capture_len_sec = xstop - xstart;
 		double sec_per_sample = capture_len_sec / length;
 		int64_t fs_per_sample = round(sec_per_sample * FS_PER_SECOND);
 		LogDebug("%ld fs/sample\n", fs_per_sample);
 
-		float* temp_buf = new float[length];
+		size_t reported_srate = (FS_PER_SECOND / fs_per_sample);
+
+		if (reported_srate != m_sampleRate)
+			LogWarning("Reported sample rate %lu != expected sample rate %lu\n", reported_srate, m_sampleRate);
+
+		if (length != m_sampleDepth)
+			LogWarning("Reported depth %lu != expected depth %lu\n", length, m_sampleDepth);
 
 		//Set up the capture we're going to store our data into (no high res timer on R&S scopes)
 		auto cap = new UniformAnalogWaveform;
@@ -427,33 +442,54 @@ bool RSRTO6Oscilloscope::AcquireData()
 		double t = GetTime();
 		cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
 
-		//Ask for the data
-		size_t len_bytes;
-		float* samples = (float*)m_secondSocket->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?; *WAI", len_bytes);
-
-		if (len_bytes != (length*sizeof(float)))
-		{
-			LogFatal("Unexpected number of bytes back");
-		}
-
-		//Read the actual data.
-		//Super easy, it comes across the wire in IEEE754 already!
 		cap->Resize(length);
 		cap->PrepareForCpuAccess();
-		memcpy((unsigned char*)cap->m_samples.GetCpuPointer(), samples, len_bytes);
+
+		size_t transferred = 0;
+		const size_t block_size = 1000e6;
+
+		LogDebug("Starting acquisition phase. length = %lu\n", length);
+
+		unsigned char* dest_buf = (unsigned char*)cap->m_samples.GetCpuPointer();
+
+		while (transferred != length)
+		{
+			size_t this_length = block_size;
+			if (this_length > (length - transferred))
+				this_length = length - transferred;
+
+			string params =  " "+to_string(transferred)+","+to_string(this_length);
+
+			if (transferred == 0 && this_length == length)
+				params = "";
+
+			//Ask for the data
+			size_t len_bytes;
+			unsigned char* samples = (unsigned char*)m_secondSocket->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?"+params+"; *WAI", len_bytes);
+
+			if (len_bytes != (this_length*sizeof(float)))
+			{
+				LogFatal("Unexpected number of bytes back");
+			}
+
+			unsigned char* cpy_target = dest_buf+(transferred*sizeof(float));
+			LogDebug("Copying %luB from %p to %p\n", len_bytes, samples, cpy_target);
+
+			memcpy(cpy_target, samples, len_bytes);
+			transferred += this_length;
+			delete[] samples;
+
+			//Discard trailing newline
+			uint8_t disregard;
+			m_secondSocket->ReadRawData(1, &disregard);
+		}
+
 		cap->MarkSamplesModifiedFromCpu();
 
-		delete[] samples;
-
-		//Discard trailing newline
-		uint8_t disregard;
-		m_secondSocket->ReadRawData(1, &disregard);
+	
 
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
-
-		//Clean up
-		delete[] temp_buf;
 	}
 
 	if (any_data)
@@ -474,10 +510,10 @@ bool RSRTO6Oscilloscope::AcquireData()
 		m_pendingWaveformsMutex.unlock();
 	}
 
-	if(!any_data || (m_triggerArmed && !m_triggerOneShot))
+	if(!any_data || !m_triggerOneShot)
 	{
-		m_secondSocket->SendCommandImmediate("SINGle; *WAI");
-		// usleep(100000);
+		m_secondSocket->SendCommandImmediate("SINGle");
+		usleep(100000);
 		// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 		m_triggerArmed = true;
 	}
@@ -496,9 +532,9 @@ bool RSRTO6Oscilloscope::AcquireData()
 void RSRTO6Oscilloscope::Start()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
-	LogDebug("Start");
-	m_secondSocket->SendCommandImmediate("SINGle; *WAI");
-	// usleep(100000);
+	LogDebug("Start\n");
+	m_secondSocket->SendCommandImmediate("SINGle");
+	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
 	m_triggerOneShot = false;
@@ -507,9 +543,9 @@ void RSRTO6Oscilloscope::Start()
 void RSRTO6Oscilloscope::StartSingleTrigger()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
-	LogDebug("Start oneshot");
-	m_secondSocket->SendCommandImmediate("SINGle; *WAI");
-	// usleep(100000);
+	LogDebug("Start oneshot\n");
+	m_secondSocket->SendCommandImmediate("SINGle");
+	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
 	m_triggerOneShot = true;
@@ -520,7 +556,7 @@ void RSRTO6Oscilloscope::Stop()
 	m_triggerArmed = false;
 
 	// lock_guard<recursive_mutex> lock(m_mutex);
-	LogDebug("Stop!");
+	LogDebug("Stop!\n");
 	m_secondSocket->SendCommandImmediate("STOP");
 	m_triggerArmed = false;
 	m_triggerOneShot = true;
@@ -528,7 +564,7 @@ void RSRTO6Oscilloscope::Stop()
 
 void RSRTO6Oscilloscope::ForceTrigger()
 {
-	LogError("RSRTO6Oscilloscope::ForceTrigger not implemented\n");
+	m_transport->SendCommandImmediate("TRIGGER1:FORCE");
 }
 
 bool RSRTO6Oscilloscope::IsTriggerArmed()
@@ -540,18 +576,67 @@ vector<uint64_t> RSRTO6Oscilloscope::GetSampleRatesNonInterleaved()
 {
 	LogWarning("RSRTO6Oscilloscope::GetSampleRatesNonInterleaved unimplemented\n");
 
-	//FIXME
+	// FIXME -- Arbitrarily copied from Tek
 	vector<uint64_t> ret;
+
+	const int64_t k = 1000;
+	const int64_t m = k*k;
+	const int64_t g = k*m;
+
+	uint64_t bases[] = { 1000, 1250, 2500, 3125, 5000, 6250 };
+	vector<uint64_t> scales = {1, 10, 100, 1*k};
+
+	for(auto b : bases)
+		ret.push_back(b / 10);
+
+	for(auto scale : scales)
+	{
+		for(auto b : bases)
+			ret.push_back(b * scale);
+	}
+
+	// // MSO6 also supports these, or at least had them available in the picker before.
+	// // TODO: Are these actually supported?
+
+	// if (m_family == FAMILY_MSO6) {
+	// 	for(auto b : bases) {
+	// 		ret.push_back(b * 10 * k);
+	// 	}
+	// }
+
+	// We break with the pattern on the upper end of the frequency range
+	ret.push_back(12500 * k);
+	ret.push_back(25 * m);
+	ret.push_back(31250 * k);
+	ret.push_back(62500 * k);
+	ret.push_back(125 * m);
+	ret.push_back(250 * m);
+	ret.push_back(312500 * k);
+	ret.push_back(625 * m);
+	ret.push_back(1250 * m);
+	ret.push_back(1562500 * k);
+	ret.push_back(3125 * m);
+	ret.push_back(6250 * m);
+	ret.push_back(12500 * m);
+
+	// Below are interpolated. 8 bits, not 12.
+	//TODO: we can save bandwidth by using 8 bit waveform download for these
+
+	ret.push_back(25 * g);
+
+	// MSO5 supports these, TODO: Does MSO6?
+	ret.push_back(25000 * m);
+	ret.push_back(62500 * m);
+	ret.push_back(125000 * m);
+	ret.push_back(250000 * m);
+	ret.push_back(500000 * m);
+
 	return ret;
 }
 
 vector<uint64_t> RSRTO6Oscilloscope::GetSampleRatesInterleaved()
 {
-	LogWarning("RSRTO6Oscilloscope::GetSampleRatesInterleaved unimplemented\n");
-
-	//FIXME
-	vector<uint64_t> ret;
-	return ret;
+	return GetSampleRatesNonInterleaved();
 }
 
 set<Oscilloscope::InterleaveConflict> RSRTO6Oscilloscope::GetInterleaveConflicts()
@@ -567,40 +652,92 @@ vector<uint64_t> RSRTO6Oscilloscope::GetSampleDepthsNonInterleaved()
 {
 	LogWarning("RSRTO6Oscilloscope::GetSampleDepthsNonInterleaved unimplemented\n");
 
-	//FIXME
+	//FIXME -- Arbitrarily copied from Tek
 	vector<uint64_t> ret;
+
+	const int64_t k = 1000;
+	const int64_t m = k*k;
+	const int64_t g = k*m;
+
+	ret.push_back(500);
+	ret.push_back(1 * k);
+	ret.push_back(2 * k);
+	ret.push_back(5 * k);
+	ret.push_back(10 * k);
+	ret.push_back(20 * k);
+	ret.push_back(50 * k);
+	ret.push_back(100 * k);
+	ret.push_back(200 * k);
+	ret.push_back(500 * k);
+
+	ret.push_back(1 * m);
+	ret.push_back(2 * m);
+	ret.push_back(5 * m);
+	ret.push_back(10 * m);
+	ret.push_back(20 * m);
+	ret.push_back(50 * m);
+	ret.push_back(62500 * k);
+	ret.push_back(100 * m);
+	ret.push_back(125 * m);
+
 	return ret;
 }
 
 vector<uint64_t> RSRTO6Oscilloscope::GetSampleDepthsInterleaved()
 {
-	LogWarning("RSRTO6Oscilloscope::GetSampleDepthsInterleaved unimplemented\n");
-
-	//FIXME
-	vector<uint64_t> ret;
-	return ret;
+	return GetSampleRatesNonInterleaved();
 }
 
 uint64_t RSRTO6Oscilloscope::GetSampleRate()
 {
-	//FIXME
+	if(m_sampleRateValid)
+		return m_sampleRate;
+
+	m_sampleRate = stod(m_transport->SendCommandQueuedWithReply("ACQUIRE:SRATE?"));
+	m_sampleRateValid = true;
+
 	return 1;
 }
 
 uint64_t RSRTO6Oscilloscope::GetSampleDepth()
 {
-	//FIXME
+	if(m_sampleDepthValid)
+		return m_sampleDepth;
+
+	GetSampleRate();
+
+	m_sampleDepth = stod(m_transport->SendCommandQueuedWithReply("TIMEBASE:RANGE?")) * (double)m_sampleRate;
+	m_sampleDepthValid = true;
+
 	return 1;
 }
 
-void RSRTO6Oscilloscope::SetSampleDepth(uint64_t /*depth*/)
+void RSRTO6Oscilloscope::SetSampleDepth(uint64_t depth)
 {
-	//FIXME
+	GetSampleRate();
+
+	//Update the cache
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_sampleDepth = depth;
+		m_sampleDepthValid = true;
+	}
+
+	m_transport->SendCommandQueued(string("TIMEBASE:RANGE ") + to_string((double)depth / (double)m_sampleRate));
 }
 
-void RSRTO6Oscilloscope::SetSampleRate(uint64_t /*rate*/)
+void RSRTO6Oscilloscope::SetSampleRate(uint64_t rate)
 {
-	//FIXME
+	//Update the cache
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_sampleRate = rate;
+		m_sampleRateValid = true;
+	}
+
+	m_transport->SendCommandQueued(string("ACQUIRE:SRATE ") + to_string(rate));
+
+	SetSampleDepth(m_sampleDepth);
 }
 
 void RSRTO6Oscilloscope::SetTriggerOffset(int64_t /*offset*/)
@@ -626,7 +763,16 @@ bool RSRTO6Oscilloscope::SetInterleaving(bool /*combine*/)
 
 void RSRTO6Oscilloscope::PullTrigger()
 {
-	m_trigger = NULL;
+	if (m_trigger == NULL)
+	{
+		m_trigger = new EdgeTrigger(this);
+		EdgeTrigger* et = dynamic_cast<EdgeTrigger*>(m_trigger);
+
+		et->SetType(EdgeTrigger::EDGE_RISING);
+		et->SetInput(0, StreamDescriptor(GetChannelByHwName("CHAN1"), 0), true);
+		et->SetLevel(1.0);
+		PushTrigger();
+	}
 }
 
 /**
@@ -639,7 +785,11 @@ void RSRTO6Oscilloscope::PullEdgeTrigger()
 
 void RSRTO6Oscilloscope::PushTrigger()
 {
-	
+	auto et = dynamic_cast<EdgeTrigger*>(m_trigger);
+	if(et)
+		PushEdgeTrigger(et);
+	else
+		LogWarning("Unknown trigger type (not an edge)\n");
 }
 
 /**
@@ -647,5 +797,28 @@ void RSRTO6Oscilloscope::PushTrigger()
  */
 void RSRTO6Oscilloscope::PushEdgeTrigger(EdgeTrigger* trig)
 {
-	
+	m_transport->SendCommandQueued("TRIGGER1:EVENT SINGLE");
+	m_transport->SendCommandQueued("TRIGGER1:TYPE EDGE");
+	m_transport->SendCommandQueued(string("TRIGGER1:SOURCE ") + trig->GetInput(0).m_channel->GetHwname());
+
+	switch(trig->GetType())
+	{
+		case EdgeTrigger::EDGE_RISING:
+			m_transport->SendCommandQueued("TRIGGER1:EDGE:SLOPE POSITIVE");
+			break;
+
+		case EdgeTrigger::EDGE_FALLING:
+			m_transport->SendCommandQueued("TRIGGER1:EDGE:SLOPE NEGATIVE");
+			break;
+
+		case EdgeTrigger::EDGE_ANY:
+			m_transport->SendCommandQueued("TRIGGER1:EDGE:SLOPE EITHER");
+			break;
+
+		default:
+			LogWarning("Unknown edge type\n");
+			break;
+	}
+
+	m_transport->SendCommandQueued(string("TRIGGER1:LEVEL") /*+ to_string(trig->GetInput(0).m_channel->GetIndex())*/ + " " + to_string(trig->GetLevel()));
 }
