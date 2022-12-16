@@ -257,13 +257,41 @@ void* SCPITransport::SendCommandImmediateWithRawBlockReply(string cmd, size_t& l
 		return NULL;
 	if(tmplen[0] == 0)	//Not sure how this happens, but sometimes occurs on Tek MSO6?
 		return NULL;
-	size_t ndigits = stoull(tmplen+1);
+	LogDebug("ndigits: %s\n", tmplen+1);
 
-	//Read the digits
-	char digits[10] = {0};
-	if(ndigits != ReadRawData(ndigits, (unsigned char*)digits))
-		return NULL;
-	len = stoull(digits);
+	if (tmplen[1] == '(')
+	{
+		// This is behavior observed on a R&S scope when there are more than 9 digits
+		string slen = "";
+		while (1)
+		{
+			unsigned char c;
+			if (1 != ReadRawData(1, &c))
+				return NULL;
+
+			if (c == ')')
+				break;
+			else if ((c >= '0') && (c <= '9'))
+				slen += c;
+			else
+				return NULL;
+		}
+
+		LogDebug("slen: %s\n", slen.c_str());
+
+		len = stoull(slen.c_str());
+	}
+	else
+	{
+		size_t ndigits = stoull(tmplen+1);
+
+		//Read the digits
+		char digits[10] = {0};
+		if(ndigits != ReadRawData(ndigits, (unsigned char*)digits))
+			return NULL;
+		LogDebug("len: %s\n", digits);
+		len = stoull(digits);
+	}
 
 	//Read the actual data
 	unsigned char* buf = new unsigned char[len];
