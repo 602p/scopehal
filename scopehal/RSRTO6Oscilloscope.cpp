@@ -162,7 +162,7 @@ void RSRTO6Oscilloscope::FlushConfigCache()
 
 bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 {
-	return i == 0;
+	return i == 0 ;//|| i == 2;
 }
 
 void RSRTO6Oscilloscope::EnableChannel(size_t i)
