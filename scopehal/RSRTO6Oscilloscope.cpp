@@ -111,16 +111,17 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 		m_channels.push_back(chan);
 		chan->SetDefaultDisplayName();
 
-		// //Request all points when we download
-		// m_transport->SendCommandQueued(chname + ":DATA:POIN MAX");
+		// TODO: Detect probe
 	}
 	m_analogChannelCount = nchans;
 
-	m_transport->SendCommandQueued("FORMat:DATA REAL,32");
-	m_transport->SendCommandQueued("ACQuire:COUNt 1");
-	m_transport->SendCommandQueued("EXPort:WAVeform:INCXvalues OFF");
-	m_transport->SendCommandQueued("TIMebase:ROLL:ENABle OFF");
-	m_transport->SendCommandQueued("TRIGGER1:MODE NORMAL");
+	m_transport->SendCommandQueued("FORMat:DATA REAL,32"); //Report in f32
+	m_transport->SendCommandQueued("ACQuire:COUNt 1"); //Limit to one acquired waveform per "SINGLE"
+	m_transport->SendCommandQueued("EXPort:WAVeform:INCXvalues OFF"); //Don't include X values in data
+	m_transport->SendCommandQueued("TIMebase:ROLL:ENABle OFF"); //No roll mode
+	m_transport->SendCommandQueued("TRIGGER1:MODE NORMAL"); //No auto trigger
+	m_transport->SendCommandQueued("ACQuire:CDTA ON"); //All channels have same timebase/etc
+	m_transport->SendCommandQueued("PROBE1:SETUP:ATT:MODE MAN"); //Allow/use manual attenuation setting with unknown probes
 	m_transport->SendCommandQueued("*WAI");
 
 	GetSampleDepth();
@@ -162,17 +163,35 @@ void RSRTO6Oscilloscope::FlushConfigCache()
 
 bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 {
-	return i == 0 ;//|| i == 2;
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+
+		if(m_channelsEnabled.find(i) != m_channelsEnabled.end())
+			return m_channelsEnabled[i];
+	}
+
+	string reply = m_transport->SendCommandQueuedWithReply(
+						m_channels[i]->GetHwname() + ":STATE?");
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelsEnabled[i] = (reply == "1");
+	return m_channelsEnabled[i];
 }
 
 void RSRTO6Oscilloscope::EnableChannel(size_t i)
 {
-	
+	m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 1");
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelsEnabled[i] = true;
 }
 
 void RSRTO6Oscilloscope::DisableChannel(size_t i)
 {
+	m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 0");
 
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelsEnabled[i] = false;
 }
 
 vector<OscilloscopeChannel::CouplingType> RSRTO6Oscilloscope::GetAvailableCouplings(size_t /*i*/)
@@ -243,39 +262,143 @@ void RSRTO6Oscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel::Coupl
 	m_channelCouplings[i] = type;
 }
 
+// PROBE1:SETUP:ATT:MODE?
+//  If MAN: PROBE1:SETUP:GAIN:MANUAL?
+//  If AUTO: PROBE1:SETUP:ATT?
+
 double RSRTO6Oscilloscope::GetChannelAttenuation(size_t i)
 {
-	// {
-	// 	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	// 	if(m_channelAttenuations.find(i) != m_channelAttenuations.end())
-	// 		return m_channelAttenuations[i];
-	// }
-	// // FIXME Don't know SCPI to get this, relying on cache
-	return 1;
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		if(m_channelAttenuations.find(i) != m_channelAttenuations.end())
+			return m_channelAttenuations[i];
+	}
+
+	string reply;
+	reply = m_transport->SendCommandQueuedWithReply(
+						"PROBE" + to_string(i+1) + ":SETUP:ATT:MODE?");
+
+	double attenuation;
+
+	if (reply == "MAN")
+	{
+		reply = m_transport->SendCommandQueuedWithReply(
+						"PROBE" + to_string(i+1) + ":SETUP:GAIN:MANUAL?");
+		attenuation = stod(reply);
+	}
+	else
+	{
+		reply = m_transport->SendCommandQueuedWithReply(
+						"PROBE" + to_string(i+1) + ":SETUP:ATT?");
+		attenuation = stod(reply);
+	}
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelAttenuations[i] = attenuation;
+	return attenuation;
 }
 
 void RSRTO6Oscilloscope::SetChannelAttenuation(size_t i, double atten)
 {
-	// {
-	// 	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	// 	m_channelAttenuations[i] = atten;
-	// }
+	string reply;
+	reply = m_transport->SendCommandQueuedWithReply(
+						"PROBE" + to_string(i+1) + ":SETUP:ATT:MODE?");
 
-	// lock_guard<recursive_mutex> lock(m_mutex);
+	if (reply == "MAN")
+	{
+		m_transport->SendCommandQueued(
+						"PROBE" + to_string(i+1) + ":SETUP:GAIN:MANUAL " + to_string(atten));
 
-	// char cmd[128];
-	// snprintf(cmd, sizeof(cmd), "PROB%zd:SET:ATT:MAN ", m_channels[i]->GetIndex()+1);
-	// PushFloat(cmd, atten);
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_channelAttenuations[i] = atten;
+	}
+	else
+	{
+		// Can't override attenuation of known probe type
+	}
 }
 
-unsigned int RSRTO6Oscilloscope::GetChannelBandwidthLimit(size_t /*i*/)
+std::string RSRTO6Oscilloscope::GetProbeName(size_t i)
 {
-	return 0;
+	return m_transport->SendCommandQueuedWithReply(
+						"PROBE" + to_string(i+1) + ":SETUP:NAME?");
 }
 
-void RSRTO6Oscilloscope::SetChannelBandwidthLimit(size_t /*i*/, unsigned int /*limit_mhz*/)
+unsigned int RSRTO6Oscilloscope::GetChannelBandwidthLimit(size_t i)
 {
-	LogWarning("RSRTO6Oscilloscope::SetChannelBandwidthLimit unimplemented\n");
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		if(m_channelBandwidthLimits.find(i) != m_channelBandwidthLimits.end())
+			return m_channelBandwidthLimits[i];
+	}
+
+	string reply;
+	reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":BANDWIDTH?");
+
+	unsigned int bw = 0;
+
+	if (reply == "FULL")
+	{
+		bw = 0;
+	}
+	else if (reply == "B200")
+	{
+		bw = 200;
+	}
+	else if (reply == "B20")
+	{
+		bw = 20;
+	}
+	else
+	{
+		LogWarning("Unknown reported bandwidth: %s\n", reply.c_str());
+	}
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelBandwidthLimits[i] = bw;
+	return bw;
+}
+
+void RSRTO6Oscilloscope::SetChannelBandwidthLimit(size_t i, unsigned int limit_mhz)
+{
+	LogDebug("Request bandwidth: %u\n", limit_mhz);
+
+	string limit_str;
+
+	if (limit_mhz == 0)
+	{
+		limit_str = "FULL";
+		limit_mhz = 0;
+	}
+	else if (limit_mhz == 20)
+	{
+		limit_str = "B20";
+		limit_mhz = 20;
+	}
+	else if (limit_mhz == 200)
+	{
+		limit_str = "B200";
+		limit_mhz = 200;
+	}
+	else
+	{
+		LogWarning("Unsupported requested bandwidth\n");
+		return;
+	}
+
+	m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":BANDWIDTH " + limit_str);
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_channelBandwidthLimits[i] = limit_mhz;
+}
+
+vector<unsigned int> RSRTO6Oscilloscope::GetChannelBandwidthLimiters(size_t /*i*/)
+{
+	vector<unsigned int> ret;
+	ret.push_back(20);
+	ret.push_back(200);
+	ret.push_back(0);
+	return ret;
 }
 
 float RSRTO6Oscilloscope::GetChannelVoltageRange(size_t i, size_t /*stream*/)
@@ -417,9 +540,6 @@ bool RSRTO6Oscilloscope::AcquireData()
 		}
 		any_data = true;
 
-		// ACQUIRE:POINTS? to query rec len
-		// length = 250e6;
-
 		//Figure out the sample rate
 		double capture_len_sec = xstop - xstart;
 		double sec_per_sample = capture_len_sec / length;
@@ -429,10 +549,15 @@ bool RSRTO6Oscilloscope::AcquireData()
 		size_t reported_srate = (FS_PER_SECOND / fs_per_sample);
 
 		if (reported_srate != m_sampleRate)
-			LogWarning("Reported sample rate %lu != expected sample rate %lu\n", reported_srate, m_sampleRate);
+		{
+			LogWarning("Reported sample rate %lu != expected sample rate %lu; using what it said\n", reported_srate, m_sampleRate);
+		}
 
 		if (length != m_sampleDepth)
-			LogWarning("Reported depth %lu != expected depth %lu\n", length, m_sampleDepth);
+		{
+			LogWarning("Reported depth %lu != expected depth %lu; using what I think is correct\n", length, m_sampleDepth);
+			length = m_sampleDepth;
+		}
 
 		//Set up the capture we're going to store our data into (no high res timer on R&S scopes)
 		auto cap = new UniformAnalogWaveform;
@@ -446,7 +571,8 @@ bool RSRTO6Oscilloscope::AcquireData()
 		cap->PrepareForCpuAccess();
 
 		size_t transferred = 0;
-		const size_t block_size = 1000e6;
+		const size_t block_size = 50e6;
+		// Chosen to match what works on my coworker's macbook :/
 
 		LogDebug("Starting acquisition phase. length = %lu\n", length);
 
@@ -564,7 +690,8 @@ void RSRTO6Oscilloscope::Stop()
 
 void RSRTO6Oscilloscope::ForceTrigger()
 {
-	m_transport->SendCommandImmediate("TRIGGER1:FORCE");
+	if (m_triggerArmed)
+		m_transport->SendCommandImmediate("TRIGGER1:FORCE");
 }
 
 bool RSRTO6Oscilloscope::IsTriggerArmed()
@@ -657,7 +784,7 @@ vector<uint64_t> RSRTO6Oscilloscope::GetSampleDepthsNonInterleaved()
 
 	const int64_t k = 1000;
 	const int64_t m = k*k;
-	const int64_t g = k*m;
+	// const int64_t g = k*m;
 
 	ret.push_back(500);
 	ret.push_back(1 * k);
@@ -780,7 +907,7 @@ void RSRTO6Oscilloscope::PullTrigger()
  */
 void RSRTO6Oscilloscope::PullEdgeTrigger()
 {
-	
+	// TODO
 }
 
 void RSRTO6Oscilloscope::PushTrigger()

@@ -59,11 +59,13 @@ public:
 	virtual void SetChannelAttenuation(size_t i, double atten);
 	virtual unsigned int GetChannelBandwidthLimit(size_t i);
 	virtual void SetChannelBandwidthLimit(size_t i, unsigned int limit_mhz);
+	virtual std::vector<unsigned int> GetChannelBandwidthLimiters(size_t i);
 	virtual float GetChannelVoltageRange(size_t i, size_t stream);
 	virtual void SetChannelVoltageRange(size_t i, size_t stream, float range);
 	virtual OscilloscopeChannel* GetExternalTrigger();
 	virtual float GetChannelOffset(size_t i, size_t stream);
 	virtual void SetChannelOffset(size_t i, size_t stream, float offset);
+	virtual std::string GetProbeName(size_t i);
 
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger();
@@ -107,6 +109,7 @@ protected:
 	std::map<size_t, float> m_channelVoltageRanges;
 	std::map<int, bool> m_channelsEnabled;
 	std::map<size_t, OscilloscopeChannel::CouplingType> m_channelCouplings;
+	std::map<size_t, int> m_channelBandwidthLimits;
 	std::map<size_t, double> m_channelAttenuations;
 
 	bool m_triggerArmed;
