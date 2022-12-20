@@ -805,7 +805,8 @@ vector<uint64_t> RSRTO6Oscilloscope::GetSampleDepthsNonInterleaved()
 	ret.push_back(50 * m);
 	ret.push_back(62500 * k);
 	ret.push_back(100 * m);
-	ret.push_back(125 * m);
+	ret.push_back(400 * m);
+	ret.push_back(800 * m);
 
 	return ret;
 }
