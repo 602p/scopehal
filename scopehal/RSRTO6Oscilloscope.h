@@ -119,6 +119,8 @@ protected:
 	uint64_t m_sampleRate;
 	bool m_sampleDepthValid;
 	uint64_t m_sampleDepth;
+	bool m_triggerOffsetValid;
+	uint64_t m_triggerOffset;
 
 	void PullEdgeTrigger();
 	void PushEdgeTrigger(EdgeTrigger* trig);

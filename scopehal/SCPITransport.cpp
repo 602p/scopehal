@@ -257,7 +257,6 @@ void* SCPITransport::SendCommandImmediateWithRawBlockReply(string cmd, size_t& l
 		return NULL;
 	if(tmplen[0] == 0)	//Not sure how this happens, but sometimes occurs on Tek MSO6?
 		return NULL;
-	LogDebug("ndigits: %s\n", tmplen+1);
 
 	if (tmplen[1] == '(')
 	{
@@ -277,8 +276,6 @@ void* SCPITransport::SendCommandImmediateWithRawBlockReply(string cmd, size_t& l
 				return NULL;
 		}
 
-		LogDebug("slen: %s\n", slen.c_str());
-
 		len = stoull(slen.c_str());
 	}
 	else
@@ -289,7 +286,6 @@ void* SCPITransport::SendCommandImmediateWithRawBlockReply(string cmd, size_t& l
 		char digits[10] = {0};
 		if(ndigits != ReadRawData(ndigits, (unsigned char*)digits))
 			return NULL;
-		LogDebug("len: %s\n", digits);
 		len = stoull(digits);
 	}
 

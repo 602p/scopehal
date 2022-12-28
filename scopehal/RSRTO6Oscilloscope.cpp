@@ -53,6 +53,7 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	, m_triggerOneShot(false)
 	, m_sampleRateValid(false)
 	, m_sampleDepthValid(false)
+	, m_triggerOffsetValid(false)
 {
 	LogDebug("m_model: %s\n", m_model.c_str());
 	if (m_model != "RTO6")
@@ -67,9 +68,9 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 		LogFatal("rs.rto6 driver requires 'lan' transport");
 	}
 
-	m_secondSocket = new SCPISocketTransport(sockettransport->GetHostname(), sockettransport->GetPort());
-	string idn2 = m_secondSocket->SendCommandImmediateWithReply("*IDN?");
-	LogDebug("idn2: %s\n", idn2.c_str());
+	// m_secondSocket = new SCPISocketTransport(sockettransport->GetHostname(), sockettransport->GetPort());
+	// string idn2 = m_secondSocket->SendCommandImmediateWithReply("*IDN?");
+	// LogDebug("idn2: %s\n", idn2.c_str());
 
 	int nchans = 4;
 	for(int i=0; i<nchans; i++)
@@ -504,14 +505,13 @@ bool RSRTO6Oscilloscope::AcquireData()
 	lock_guard<recursive_mutex> lock(m_mutex);
 	m_transport->FlushCommandQueue();
 	LogDebug(" ** AcquireData ** \n");
+	LogIndenter li;
 
 	GetSampleDepth();
 
 	auto start_time = std::chrono::system_clock::now();
 
 	// m_transport->SendCommandQueued("*DCL; *WAI");
-
-	LogIndenter li;
 
 	map<int, vector<UniformAnalogWaveform*> > pending_waveforms;
 	bool any_data = false;
@@ -522,7 +522,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 			continue;
 
 		//This is basically the same function as a LeCroy WAVEDESC, but much less detailed
-		string reply = m_secondSocket->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
+		string reply = m_transport->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
 
 		double xstart;
 		double xstop;
@@ -571,10 +571,15 @@ bool RSRTO6Oscilloscope::AcquireData()
 		cap->PrepareForCpuAccess();
 
 		size_t transferred = 0;
-		const size_t block_size = 50e6;
-		// Chosen to match what works on my coworker's macbook :/
+		const size_t block_size =
+			#if __APPLE__
+				50e6 // For some reason values larger than this on my coworkers macbook fail in recv(2)
+			#else
+				10000e6
+			#endif
+		;
 
-		LogDebug("Starting acquisition phase. length = %lu\n", length);
+		LogDebug("Starting acquisition phase for ch%ld. length = %lu\n", i, length);
 
 		unsigned char* dest_buf = (unsigned char*)cap->m_samples.GetCpuPointer();
 
@@ -589,17 +594,32 @@ bool RSRTO6Oscilloscope::AcquireData()
 			if (transferred == 0 && this_length == length)
 				params = "";
 
+			LogDebug("[%3d%%] Query ...`DATA?%s` (B)\n", (int)(100*((float)transferred/(float)length)), params.c_str());
+
 			//Ask for the data
 			size_t len_bytes;
-			unsigned char* samples = (unsigned char*)m_secondSocket->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?"+params+"; *WAI", len_bytes);
+			unsigned char* samples = (unsigned char*)m_transport->SendCommandImmediateWithRawBlockReply(m_channels[i]->GetHwname() + ":DATA?"+params+"; *WAI", len_bytes);
 
 			if (len_bytes != (this_length*sizeof(float)))
 			{
-				LogFatal("Unexpected number of bytes back");
+				LogError("Unexpected number of bytes back; aborting acquisition");
+				usleep(100000);
+				m_transport->FlushRXBuffer();
+
+				delete cap;
+
+				for (auto* c : pending_waveforms[i])
+				{
+					delete c;
+				}
+
+				delete[] samples;
+
+				return false;
 			}
 
 			unsigned char* cpy_target = dest_buf+(transferred*sizeof(float));
-			LogDebug("Copying %luB from %p to %p\n", len_bytes, samples, cpy_target);
+			// LogDebug("Copying %luB from %p to %p\n", len_bytes, samples, cpy_target);
 
 			memcpy(cpy_target, samples, len_bytes);
 			transferred += this_length;
@@ -607,8 +627,10 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 			//Discard trailing newline
 			uint8_t disregard;
-			m_secondSocket->ReadRawData(1, &disregard);
+			m_transport->ReadRawData(1, &disregard);
 		}
+
+		LogDebug("[100%%] Done\n");
 
 		cap->MarkSamplesModifiedFromCpu();
 
@@ -638,7 +660,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 	if(!any_data || !m_triggerOneShot)
 	{
-		m_secondSocket->SendCommandImmediate("SINGle");
+		m_transport->SendCommandImmediate("SINGle");
 		usleep(100000);
 		// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 		m_triggerArmed = true;
@@ -659,7 +681,7 @@ void RSRTO6Oscilloscope::Start()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start\n");
-	m_secondSocket->SendCommandImmediate("SINGle");
+	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
@@ -670,7 +692,7 @@ void RSRTO6Oscilloscope::StartSingleTrigger()
 {
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start oneshot\n");
-	m_secondSocket->SendCommandImmediate("SINGle");
+	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
 	// If we don't wait here, sending the query for available waveforms will race and return 1 for the exitisting waveform and jam everything up.
 	m_triggerArmed = true;
@@ -683,7 +705,7 @@ void RSRTO6Oscilloscope::Stop()
 
 	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Stop!\n");
-	m_secondSocket->SendCommandImmediate("STOP");
+	m_transport->SendCommandImmediate("STOP");
 	m_triggerArmed = false;
 	m_triggerOneShot = true;
 }
@@ -819,10 +841,15 @@ vector<uint64_t> RSRTO6Oscilloscope::GetSampleDepthsInterleaved()
 uint64_t RSRTO6Oscilloscope::GetSampleRate()
 {
 	if(m_sampleRateValid)
+	{
+		LogDebug("GetSampleRate() queried and returned cached value %ld\n", m_sampleRate);
 		return m_sampleRate;
+	}
 
 	m_sampleRate = stod(m_transport->SendCommandQueuedWithReply("ACQUIRE:SRATE?"));
 	m_sampleRateValid = true;
+
+	LogDebug("GetSampleRate() queried and got new value %ld\n", m_sampleRate);
 
 	return 1;
 }
@@ -830,12 +857,17 @@ uint64_t RSRTO6Oscilloscope::GetSampleRate()
 uint64_t RSRTO6Oscilloscope::GetSampleDepth()
 {
 	if(m_sampleDepthValid)
+	{
+		LogDebug("GetSampleDepth() queried and returned cached value %ld\n", m_sampleDepth);
 		return m_sampleDepth;
+	}
 
 	GetSampleRate();
 
 	m_sampleDepth = stod(m_transport->SendCommandQueuedWithReply("TIMEBASE:RANGE?")) * (double)m_sampleRate;
 	m_sampleDepthValid = true;
+
+	LogDebug("GetSampleDepth() queried and got new value %ld\n", m_sampleDepth);
 
 	return 1;
 }
@@ -851,6 +883,8 @@ void RSRTO6Oscilloscope::SetSampleDepth(uint64_t depth)
 		m_sampleDepthValid = true;
 	}
 
+	LogDebug("SetSampleDepth() setting to %ld\n", depth);
+
 	m_transport->SendCommandQueued(string("TIMEBASE:RANGE ") + to_string((double)depth / (double)m_sampleRate));
 }
 
@@ -863,20 +897,39 @@ void RSRTO6Oscilloscope::SetSampleRate(uint64_t rate)
 		m_sampleRateValid = true;
 	}
 
+	LogDebug("SetSampleRate() setting to %ld\n", rate);
+
 	m_transport->SendCommandQueued(string("ACQUIRE:SRATE ") + to_string(rate));
 
 	SetSampleDepth(m_sampleDepth);
 }
 
-void RSRTO6Oscilloscope::SetTriggerOffset(int64_t /*offset*/)
+void RSRTO6Oscilloscope::SetTriggerOffset(int64_t offset)
 {
-	//FIXME
+	//Update the cache
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_triggerOffset = offset;
+		m_triggerOffsetValid = false; // Probably will be rounded
+	}
+
+	m_transport->SendCommandQueued("TIMEBASE:HORIZONTAL:POSITION " + to_string(-((double)offset)*((double)SECONDS_PER_FS)));
 }
 
 int64_t RSRTO6Oscilloscope::GetTriggerOffset()
 {
-	//FIXME
-	return 0;
+	if(m_triggerOffsetValid)
+	{
+		LogDebug("GetTriggerOffset() queried and returned cached value %ld\n", m_triggerOffset);
+		return m_triggerOffset;
+	}
+
+	string reply = m_transport->SendCommandQueuedWithReply("TIMEBASE:HORIZONTAL:POSITION?");
+
+	m_triggerOffset = -stof(reply)*FS_PER_SECOND;
+	m_triggerOffsetValid = true;
+
+	return m_triggerOffset;
 }
 
 bool RSRTO6Oscilloscope::IsInterleaving()
@@ -891,8 +944,18 @@ bool RSRTO6Oscilloscope::SetInterleaving(bool /*combine*/)
 
 void RSRTO6Oscilloscope::PullTrigger()
 {
-	if (m_trigger == NULL)
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	string resp = m_transport->SendCommandQueuedWithReply("TRIGGER1:TYPE?");
+
+	if (resp == "EDGE")
+		PullEdgeTrigger();
+	else
 	{
+		LogWarning("Unknown Trigger Type. Forcing Edge.\n");
+
+		delete m_trigger;
+
 		m_trigger = new EdgeTrigger(this);
 		EdgeTrigger* et = dynamic_cast<EdgeTrigger*>(m_trigger);
 
@@ -900,6 +963,7 @@ void RSRTO6Oscilloscope::PullTrigger()
 		et->SetInput(0, StreamDescriptor(GetChannelByHwName("CHAN1"), 0), true);
 		et->SetLevel(1.0);
 		PushTrigger();
+		PullTrigger();
 	}
 }
 
@@ -908,7 +972,35 @@ void RSRTO6Oscilloscope::PullTrigger()
  */
 void RSRTO6Oscilloscope::PullEdgeTrigger()
 {
-	// TODO
+	if( (m_trigger != NULL) && (dynamic_cast<EdgeTrigger*>(m_trigger) != NULL) )
+	{
+		delete m_trigger;
+		m_trigger = NULL;
+	}
+
+	//Create a new trigger if necessary
+	if(m_trigger == NULL)
+		m_trigger = new EdgeTrigger(this);
+	EdgeTrigger* et = dynamic_cast<EdgeTrigger*>(m_trigger);
+
+	string reply = m_transport->SendCommandQueuedWithReply("TRIGGER1:SOURCE?");
+	et->SetInput(0, StreamDescriptor(GetChannelByHwName(reply), 0), true);
+
+	reply = m_transport->SendCommandQueuedWithReply("TRIGGER1:EDGE:SLOPE?");
+	if (reply == "POS")
+		et->SetType(EdgeTrigger::EDGE_RISING);
+	else if (reply == "NEG")
+		et->SetType(EdgeTrigger::EDGE_FALLING);
+	else if (reply == "EITH")
+		et->SetType(EdgeTrigger::EDGE_ANY);
+	else
+	{
+		LogWarning("Unknown edge type\n");
+		et->SetType(EdgeTrigger::EDGE_ANY);
+	}
+
+	reply = m_transport->SendCommandQueuedWithReply("TRIGGER1:LEVEL?");
+	et->SetLevel(stof(reply));
 }
 
 void RSRTO6Oscilloscope::PushTrigger()
