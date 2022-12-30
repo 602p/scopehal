@@ -68,12 +68,9 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 		LogFatal("rs.rto6 driver requires 'lan' transport");
 	}
 
-	// m_secondSocket = new SCPISocketTransport(sockettransport->GetHostname(), sockettransport->GetPort());
-	// string idn2 = m_secondSocket->SendCommandImmediateWithReply("*IDN?");
-	// LogDebug("idn2: %s\n", idn2.c_str());
-
-	int nchans = 4;
-	for(int i=0; i<nchans; i++)
+	// RTO6 always has four analog channels
+	m_analogChannelCount = 4;
+	for(unsigned int i=0; i<m_analogChannelCount; i++)
 	{
 		//Hardware name of the channel
 		string chname = string("CHAN1");
@@ -111,10 +108,66 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 			i);
 		m_channels.push_back(chan);
 		chan->SetDefaultDisplayName();
-
-		// TODO: Detect probe
 	}
-	m_analogChannelCount = nchans;
+
+	// All RTO6 have external trigger; only edge is supported
+	m_extTrigChannel = new OscilloscopeChannel(
+		this,
+		"EXT",
+		"",
+		Unit(Unit::UNIT_FS),
+		Unit(Unit::UNIT_VOLTS),
+		Stream::STREAM_TYPE_TRIGGER,
+		m_channels.size());
+	m_channels.push_back(m_extTrigChannel);
+
+	m_digitalChannelBase = m_channels.size();
+	m_digitalChannelCount = 0;
+
+	string reply = m_transport->SendCommandQueuedWithReply("*OPT?", false);
+	vector<string> opts;
+	stringstream s_stream(reply);
+	while(s_stream.good()) {
+		string substr;
+		getline(s_stream, substr, ',');
+		opts.push_back(substr);
+	}
+
+	for (auto app : opts)
+	{
+		if (app == "B1")
+		{
+			LogVerbose(" * RTO6 has logic analyzer/MSO option\n");
+			m_digitalChannelCount = 16; // Always 16 (2x8 probe "pods") to my understanding
+		}
+		else
+		{
+			LogDebug("(* Also has option '%s' (ignored))\n", app.c_str());
+		}
+	}
+
+	// Set up digital channels (if any)
+	for(unsigned int i=0; i<m_digitalChannelCount; i++)
+	{
+		//Hardware name of the channel
+		string chname = string("D0");
+		chname[1] += i;
+
+		//Create the channel
+		auto chan = new OscilloscopeChannel(
+			this,
+			chname,
+			"#555555",
+			Unit(Unit::UNIT_FS),
+			Unit(Unit::UNIT_COUNTS),
+			Stream::STREAM_TYPE_DIGITAL,
+			m_channels.size());
+		m_channels.push_back(chan);
+		chan->SetDefaultDisplayName();
+	}
+
+	if (m_digitalChannelCount)
+		m_transport->SendCommandQueued("DIG1:THCoupling OFF"); //Allow different threshold per-bank
 
 	m_transport->SendCommandQueued("FORMat:DATA REAL,32"); //Report in f32
 	m_transport->SendCommandQueued("ACQuire:COUNt 1"); //Limit to one acquired waveform per "SINGLE"
@@ -162,8 +215,16 @@ void RSRTO6Oscilloscope::FlushConfigCache()
 	m_trigger = NULL;
 }
 
+OscilloscopeChannel* RSRTO6Oscilloscope::GetExternalTrigger()
+{
+	return m_extTrigChannel;
+}
+
 bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 {
+	if(i == m_extTrigChannel->GetIndex())
+		return false;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 
@@ -181,7 +242,13 @@ bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 
 void RSRTO6Oscilloscope::EnableChannel(size_t i)
 {
-	m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 1");
+	if(i == m_extTrigChannel->GetIndex())
+		return;
+
+	if (IsAnalog(i))
+		m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 1");
+	else
+		m_transport->SendCommandQueued("DIG" + to_string(HWDigitalNumber(i)) + ":DISP ON");
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	m_channelsEnabled[i] = true;
@@ -189,35 +256,44 @@ void RSRTO6Oscilloscope::EnableChannel(size_t i)
 
 void RSRTO6Oscilloscope::DisableChannel(size_t i)
 {
-	m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 0");
+	if(i == m_extTrigChannel->GetIndex())
+		return;
+
+	if (IsAnalog(i))
+		m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 0");
+	else
+		m_transport->SendCommandQueued("DIG" + to_string(HWDigitalNumber(i)) + ":DISP OFF");
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	m_channelsEnabled[i] = false;
 }
 
-vector<OscilloscopeChannel::CouplingType> RSRTO6Oscilloscope::GetAvailableCouplings(size_t /*i*/)
+vector<OscilloscopeChannel::CouplingType> RSRTO6Oscilloscope::GetAvailableCouplings(size_t i)
 {
 	vector<OscilloscopeChannel::CouplingType> ret;
-	ret.push_back(OscilloscopeChannel::COUPLE_DC_1M);
-	ret.push_back(OscilloscopeChannel::COUPLE_AC_1M);
+
+	if (IsAnalog(i))
+	{
+		ret.push_back(OscilloscopeChannel::COUPLE_DC_1M);
+		ret.push_back(OscilloscopeChannel::COUPLE_AC_1M);
+	}
+
 	ret.push_back(OscilloscopeChannel::COUPLE_DC_50);
 	return ret;
 }
 
 OscilloscopeChannel::CouplingType RSRTO6Oscilloscope::GetChannelCoupling(size_t i)
 {
+	if (!IsAnalog(i))
+		return OscilloscopeChannel::COUPLE_DC_50;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		if(m_channelCouplings.find(i) != m_channelCouplings.end())
 			return m_channelCouplings[i];
 	}
 
-	string reply;
-	{
-		// lock_guard<recursive_mutex> lock(m_mutex);
-
-		reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":COUP?");
-	}
+	string reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":COUP?");
 	OscilloscopeChannel::CouplingType coupling;
 
 	if(reply == "AC")
@@ -239,6 +315,8 @@ OscilloscopeChannel::CouplingType RSRTO6Oscilloscope::GetChannelCoupling(size_t 
 
 void RSRTO6Oscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel::CouplingType type)
 {
+	if (!IsAnalog(i)) return;
+
 	{
 		// lock_guard<recursive_mutex> lock(m_mutex);
 		switch(type)
@@ -269,6 +347,9 @@ void RSRTO6Oscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel::Coupl
 
 double RSRTO6Oscilloscope::GetChannelAttenuation(size_t i)
 {
+	if (!IsAnalog(i))
+		return 1;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		if(m_channelAttenuations.find(i) != m_channelAttenuations.end())
@@ -301,6 +382,8 @@ double RSRTO6Oscilloscope::GetChannelAttenuation(size_t i)
 
 void RSRTO6Oscilloscope::SetChannelAttenuation(size_t i, double atten)
 {
+	if (!IsAnalog(i)) return;
+
 	string reply;
 	reply = m_transport->SendCommandQueuedWithReply(
 						"PROBE" + to_string(i+1) + ":SETUP:ATT:MODE?");
@@ -321,12 +404,18 @@ void RSRTO6Oscilloscope::SetChannelAttenuation(size_t i, double atten)
 
 std::string RSRTO6Oscilloscope::GetProbeName(size_t i)
 {
+	if (!IsAnalog(i))
+		return "";
+
 	return m_transport->SendCommandQueuedWithReply(
 						"PROBE" + to_string(i+1) + ":SETUP:NAME?");
 }
 
 unsigned int RSRTO6Oscilloscope::GetChannelBandwidthLimit(size_t i)
 {
+	if (!IsAnalog(i))
+		return 0;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		if(m_channelBandwidthLimits.find(i) != m_channelBandwidthLimits.end())
@@ -362,6 +451,8 @@ unsigned int RSRTO6Oscilloscope::GetChannelBandwidthLimit(size_t i)
 
 void RSRTO6Oscilloscope::SetChannelBandwidthLimit(size_t i, unsigned int limit_mhz)
 {
+	if (!IsAnalog(i)) return;
+
 	LogDebug("Request bandwidth: %u\n", limit_mhz);
 
 	string limit_str;
@@ -393,24 +484,29 @@ void RSRTO6Oscilloscope::SetChannelBandwidthLimit(size_t i, unsigned int limit_m
 	m_channelBandwidthLimits[i] = limit_mhz;
 }
 
-vector<unsigned int> RSRTO6Oscilloscope::GetChannelBandwidthLimiters(size_t /*i*/)
+vector<unsigned int> RSRTO6Oscilloscope::GetChannelBandwidthLimiters(size_t i)
 {
 	vector<unsigned int> ret;
-	ret.push_back(20);
-	ret.push_back(200);
+
+	if (IsAnalog(i))
+	{
+		ret.push_back(20);
+		ret.push_back(200);
+	}
+
 	ret.push_back(0);
 	return ret;
 }
 
 float RSRTO6Oscilloscope::GetChannelVoltageRange(size_t i, size_t /*stream*/)
 {
+	if (!IsAnalog(i)) return 0;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		if(m_channelVoltageRanges.find(i) != m_channelVoltageRanges.end())
 			return m_channelVoltageRanges[i];
 	}
-
-	// lock_guard<recursive_mutex> lock2(m_mutex);
 
 	string reply = m_transport->SendCommandQueuedWithReply(m_channels[i]->GetHwname() + ":RANGE?");
 
@@ -423,26 +519,22 @@ float RSRTO6Oscilloscope::GetChannelVoltageRange(size_t i, size_t /*stream*/)
 
 void RSRTO6Oscilloscope::SetChannelVoltageRange(size_t i, size_t /*stream*/, float range)
 {
+	if (!IsAnalog(i)) return;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		m_channelVoltageRanges[i] = range;
 	}
 
-	// lock_guard<recursive_mutex> lock(m_mutex);
 	char cmd[128];
 	snprintf(cmd, sizeof(cmd), "%s:RANGE %.4f", m_channels[i]->GetHwname().c_str(), range);
 	m_transport->SendCommandQueued(cmd);
 }
 
-OscilloscopeChannel* RSRTO6Oscilloscope::GetExternalTrigger()
-{
-	//FIXME
-	LogWarning("RSRTO6Oscilloscope::GetExternalTrigger unimplemented\n");
-	return NULL;
-}
-
 float RSRTO6Oscilloscope::GetChannelOffset(size_t i, size_t /*stream*/)
 {
+	if (!IsAnalog(i)) return 0;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 
@@ -464,6 +556,8 @@ float RSRTO6Oscilloscope::GetChannelOffset(size_t i, size_t /*stream*/)
 
 void RSRTO6Oscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float offset)
 {
+	if (!IsAnalog(i)) return;
+
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		m_channelOffsets[i] = offset;
@@ -474,6 +568,53 @@ void RSRTO6Oscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float off
 	snprintf(cmd, sizeof(cmd), "%s:OFFS %.4f", m_channels[i]->GetHwname().c_str(), -offset);
 	m_transport->SendCommandQueued(cmd);
 }
+
+//////////////////////////////////////////////////////////////////////////////// <Digital>
+
+vector<Oscilloscope::DigitalBank> RSRTO6Oscilloscope::GetDigitalBanks()
+{
+	vector<DigitalBank> banks;
+
+	for (unsigned int i = 0; i < m_digitalChannelCount; i += 4)
+	{
+		DigitalBank bank;
+		for (int n = 0; n < 4; n++)
+			bank.push_back(m_channels[m_digitalChannelBase + i + n]);
+		banks.push_back(bank);
+	}
+
+	return banks;
+}
+
+Oscilloscope::DigitalBank RSRTO6Oscilloscope::GetDigitalBank(size_t channel)
+{
+	return GetDigitalBanks()[HWDigitalNumber(channel) - (HWDigitalNumber(channel) % 4)];
+}
+
+bool RSRTO6Oscilloscope::IsDigitalHysteresisConfigurable()
+{
+	return false;
+	// TODO: It is "sorta" configurable... but not as a settable value
+	// See https://www.rohde-schwarz.com/webhelp/RTO6_HTML_UserManual_en/Content/5af36d65427b4b68.htm
+}
+
+bool RSRTO6Oscilloscope::IsDigitalThresholdConfigurable()
+{
+	return true;
+}
+
+float RSRTO6Oscilloscope::GetDigitalThreshold(size_t channel)
+{
+	// Cache?
+	return stof(m_transport->SendCommandQueuedWithReply("DIG" + to_string(HWDigitalNumber(channel)) + ":THR?"));
+}
+
+void RSRTO6Oscilloscope::SetDigitalThreshold(size_t channel, float level)
+{
+	m_transport->SendCommandQueuedWithReply("DIG" + to_string(HWDigitalNumber(channel)) + ":THR " + to_string(level));
+}
+
+//////////////////////////////////////////////////////////////////////////////// </Digital>
 
 Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 {
@@ -500,6 +641,58 @@ Oscilloscope::TriggerMode RSRTO6Oscilloscope::PollTrigger()
 	// return m_triggerArmed ? TRIGGER_MODE_TRIGGERED : TRIGGER_MODE_STOP;
 }
 
+template <typename T> size_t RSRTO6Oscilloscope::AcquireHeader(T* cap, string chname)
+{
+	//This is basically the same function as a LeCroy WAVEDESC, but much less detailed
+	string reply = m_transport->SendCommandImmediateWithReply(chname + ":DATA:HEAD?; *WAI");
+
+	double xstart;
+	double xstop;
+	size_t length;
+	int samples_per_interval;
+	int rc = sscanf(reply.c_str(), "%lf,%lf,%zu,%d", &xstart, &xstop, &length, &samples_per_interval);
+	if (samples_per_interval != 1)
+		LogFatal("Don't understand samples_per_interval != 1");
+
+	if (rc != 4 || length == 0)
+	{
+		/* No data - Skip query the scope and move on */
+		return 0;
+	}
+
+	//Figure out the sample rate
+	double capture_len_sec = xstop - xstart;
+	double sec_per_sample = capture_len_sec / length;
+	int64_t fs_per_sample = round(sec_per_sample * FS_PER_SECOND);
+	LogDebug("%ld fs/sample\n", fs_per_sample);
+
+	size_t reported_srate = (FS_PER_SECOND / fs_per_sample);
+
+	if (reported_srate != m_sampleRate)
+	{
+		LogWarning("Reported sample rate %lu != expected sample rate %lu; using what it said\n", reported_srate, m_sampleRate);
+	}
+
+	if (length != m_sampleDepth)
+	{
+		LogWarning("Reported depth %lu != expected depth %lu; using what I think is correct\n", length, m_sampleDepth);
+		length = m_sampleDepth;
+	}
+
+	//Set up the capture we're going to store our data into (no high res timer on R&S scopes)
+	
+	cap->m_timescale = fs_per_sample;
+	cap->m_triggerPhase = 0;
+	cap->m_startTimestamp = time(NULL);
+	double t = GetTime();
+	cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
+
+	cap->Resize(length);
+	cap->PrepareForCpuAccess();
+
+	return length;
+}
+
 bool RSRTO6Oscilloscope::AcquireData()
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
@@ -513,7 +706,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 	// m_transport->SendCommandQueued("*DCL; *WAI");
 
-	map<int, vector<UniformAnalogWaveform*> > pending_waveforms;
+	map<int, vector<WaveformBase*> > pending_waveforms;
 	bool any_data = false;
 
 	for(size_t i=0; i<m_analogChannelCount; i++)
@@ -521,54 +714,17 @@ bool RSRTO6Oscilloscope::AcquireData()
 		if(!IsChannelEnabled(i))
 			continue;
 
-		//This is basically the same function as a LeCroy WAVEDESC, but much less detailed
-		string reply = m_transport->SendCommandImmediateWithReply(m_channels[i]->GetHwname() + ":DATA:HEAD?; *WAI");
+		auto cap = new UniformAnalogWaveform;
+		size_t length = AcquireHeader(cap, m_channels[i]->GetHwname());
 
-		double xstart;
-		double xstop;
-		size_t length;
-		int samples_per_interval;
-		int rc = sscanf(reply.c_str(), "%lf,%lf,%zu,%d", &xstart, &xstop, &length, &samples_per_interval);
-		if (samples_per_interval != 1)
-			LogFatal("Don't understand samples_per_interval != 1");
-
-		if (rc != 4 || length == 0)
+		if (!length)
 		{
-			/* No data - Skip query the scope and move on */
+			delete cap;
 			pending_waveforms[i].push_back(NULL);
 			continue;
 		}
+
 		any_data = true;
-
-		//Figure out the sample rate
-		double capture_len_sec = xstop - xstart;
-		double sec_per_sample = capture_len_sec / length;
-		int64_t fs_per_sample = round(sec_per_sample * FS_PER_SECOND);
-		LogDebug("%ld fs/sample\n", fs_per_sample);
-
-		size_t reported_srate = (FS_PER_SECOND / fs_per_sample);
-
-		if (reported_srate != m_sampleRate)
-		{
-			LogWarning("Reported sample rate %lu != expected sample rate %lu; using what it said\n", reported_srate, m_sampleRate);
-		}
-
-		if (length != m_sampleDepth)
-		{
-			LogWarning("Reported depth %lu != expected depth %lu; using what I think is correct\n", length, m_sampleDepth);
-			length = m_sampleDepth;
-		}
-
-		//Set up the capture we're going to store our data into (no high res timer on R&S scopes)
-		auto cap = new UniformAnalogWaveform;
-		cap->m_timescale = fs_per_sample;
-		cap->m_triggerPhase = 0;
-		cap->m_startTimestamp = time(NULL);
-		double t = GetTime();
-		cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
-
-		cap->Resize(length);
-		cap->PrepareForCpuAccess();
 
 		size_t transferred = 0;
 		const size_t block_size =
@@ -634,7 +790,68 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 		cap->MarkSamplesModifiedFromCpu();
 
-	
+		//Done, update the data
+		pending_waveforms[i].push_back(cap);
+	}
+
+	for(size_t i=m_digitalChannelBase; i<(m_digitalChannelBase + m_digitalChannelCount); i++)
+	{
+		string hwname = "DIG" + to_string(HWDigitalNumber(i));
+
+		auto cap = new SparseDigitalWaveform;
+		size_t length = AcquireHeader(cap, hwname);
+
+		if (!length)
+		{
+			delete cap;
+			pending_waveforms[i].push_back(NULL);
+			continue;
+		}
+
+		LogDebug("Starting acquisition for dig%d\n", HWDigitalNumber(i));
+
+		// Digital channels do not appear to support selecting a subset, so no 'chunking'
+
+		size_t len_bytes;
+		unsigned char* samples = (unsigned char*)m_transport->SendCommandImmediateWithRawBlockReply(hwname + ":DATA?; *WAI", len_bytes);
+
+		bool last = samples[0] == '1';
+
+		cap->m_offsets[0] = 0;
+		cap->m_durations[0] = 1;
+		cap->m_samples[0] = last;
+
+		size_t k = 0;
+
+		for(size_t m=1; m<length; m++)
+		{
+			bool sample = samples[m] == '1';
+
+			//Deduplicate consecutive samples with same value
+			//FIXME: temporary workaround for rendering bugs
+			//if(last == sample)
+			if( (last == sample) && ((m+5) < length) && (m > 5))
+				cap->m_durations[k] ++;
+
+			//Nope, it toggled - store the new value
+			else
+			{
+				k++;
+				cap->m_offsets[k] = m;
+				cap->m_durations[k] = 1;
+				cap->m_samples[k] = sample;
+				last = sample;
+			}
+		}
+
+		//Free space reclaimed by deduplication
+		cap->Resize(k);
+		cap->m_offsets.shrink_to_fit();
+		cap->m_durations.shrink_to_fit();
+		cap->m_samples.shrink_to_fit();
+
+		cap->MarkSamplesModifiedFromCpu();
+		cap->MarkTimestampsModifiedFromCpu();
 
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
@@ -648,7 +865,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 		for(size_t i=0; i<num_pending; i++)
 		{
 			SequenceSet s;
-			for(size_t j=0; j<m_analogChannelCount; j++)
+			for(size_t j=0; j<m_channels.size(); j++)
 			{
 				if(IsChannelEnabled(j))
 					s[m_channels[j]] = pending_waveforms[j][i];
@@ -679,7 +896,6 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 void RSRTO6Oscilloscope::Start()
 {
-	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start\n");
 	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
@@ -690,7 +906,6 @@ void RSRTO6Oscilloscope::Start()
 
 void RSRTO6Oscilloscope::StartSingleTrigger()
 {
-	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Start oneshot\n");
 	m_transport->SendCommandImmediate("SINGle");
 	usleep(100000);
@@ -703,7 +918,6 @@ void RSRTO6Oscilloscope::Stop()
 {
 	m_triggerArmed = false;
 
-	// lock_guard<recursive_mutex> lock(m_mutex);
 	LogDebug("Stop!\n");
 	m_transport->SendCommandImmediate("STOP");
 	m_triggerArmed = false;
@@ -910,7 +1124,7 @@ void RSRTO6Oscilloscope::SetTriggerOffset(int64_t offset)
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		m_triggerOffset = offset;
-		m_triggerOffsetValid = false; // Probably will be rounded
+		m_triggerOffsetValid = false; // Probably will be rounded and/or clipped
 	}
 
 	m_transport->SendCommandQueued("TIMEBASE:HORIZONTAL:POSITION " + to_string(-((double)offset)*((double)SECONDS_PER_FS)));
