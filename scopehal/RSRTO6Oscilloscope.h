@@ -32,7 +32,9 @@
 
 class EdgeTrigger;
 
-class RSRTO6Oscilloscope : public virtual SCPIOscilloscope
+class RSRTO6Oscilloscope 
+	: public virtual SCPIOscilloscope
+	, public virtual SCPIFunctionGenerator
 {
 public:
 	RSRTO6Oscilloscope(SCPITransport* transport);
@@ -103,6 +105,40 @@ public:
 	virtual bool IsInterleaving();
 	virtual bool SetInterleaving(bool combine);
 
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Function generator
+
+	//Channel info
+	virtual int GetFunctionChannelCount();
+	virtual std::string GetFunctionChannelName(int chan);
+
+	virtual std::vector<WaveShape> GetAvailableWaveformShapes(int chan);
+
+	//Configuration
+	virtual bool GetFunctionChannelActive(int chan);
+	virtual void SetFunctionChannelActive(int chan, bool on);
+
+	virtual bool HasFunctionDutyCycleControls(int chan);
+	virtual float GetFunctionChannelDutyCycle(int chan);
+	virtual void SetFunctionChannelDutyCycle(int chan, float duty);
+
+	virtual float GetFunctionChannelAmplitude(int chan);
+	virtual void SetFunctionChannelAmplitude(int chan, float amplitude);
+
+	virtual float GetFunctionChannelOffset(int chan);
+	virtual void SetFunctionChannelOffset(int chan, float offset);
+
+	virtual float GetFunctionChannelFrequency(int chan);
+	virtual void SetFunctionChannelFrequency(int chan, float hz);
+
+	virtual WaveShape GetFunctionChannelShape(int chan);
+	virtual void SetFunctionChannelShape(int chan, WaveShape shape);
+
+	virtual bool HasFunctionRiseFallTimeControls(int chan);
+
+	virtual OutputImpedance GetFunctionChannelOutputImpedance(int chan);
+	virtual void SetFunctionChannelOutputImpedance(int chan, OutputImpedance z);
+
 protected:
 	OscilloscopeChannel* m_extTrigChannel;
 
@@ -113,6 +149,9 @@ protected:
 	unsigned int m_analogChannelCount;
 	unsigned int m_digitalChannelBase;
 	unsigned int m_digitalChannelCount;
+	bool m_hasAFG;
+
+	const static std::map<const std::string, const WaveShape> m_waveShapeNames;
 
 	bool IsAnalog(size_t index)
 	{ return index < m_analogChannelCount; }

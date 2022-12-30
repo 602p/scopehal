@@ -49,6 +49,7 @@ using namespace std;
 RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	: SCPIDevice(transport)
 	, SCPIInstrument(transport)
+	, m_hasAFG(false)
 	, m_triggerArmed(false)
 	, m_triggerOneShot(false)
 	, m_sampleRateValid(false)
@@ -140,6 +141,11 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 			LogVerbose(" * RTO6 has logic analyzer/MSO option\n");
 			m_digitalChannelCount = 16; // Always 16 (2x8 probe "pods") to my understanding
 		}
+		else if (app == "B6")
+		{
+			LogVerbose(" * RTO6 has func gen option\n");
+			m_hasAFG = true;
+		}
 		else
 		{
 			LogDebug("(* Also has option '%s' (ignored))\n", app.c_str());
@@ -169,6 +175,12 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	if (m_digitalChannelCount)
 		m_transport->SendCommandQueued("DIG1:THCoupling OFF"); //Allow different threshold per-bank
 
+	if (m_hasAFG)
+	{
+		m_transport->SendCommandQueued("WGEN1:SOURCE FUNCGEN"); //Don't currently support modulation or other modes
+		m_transport->SendCommandQueued("WGEN2:SOURCE FUNCGEN");
+	}
+
 	m_transport->SendCommandQueued("FORMat:DATA REAL,32"); //Report in f32
 	m_transport->SendCommandQueued("ACQuire:COUNt 1"); //Limit to one acquired waveform per "SINGLE"
 	m_transport->SendCommandQueued("EXPort:WAVeform:INCXvalues OFF"); //Don't include X values in data
@@ -176,6 +188,7 @@ RSRTO6Oscilloscope::RSRTO6Oscilloscope(SCPITransport* transport)
 	m_transport->SendCommandQueued("TRIGGER1:MODE NORMAL"); //No auto trigger
 	m_transport->SendCommandQueued("ACQuire:CDTA ON"); //All channels have same timebase/etc
 	m_transport->SendCommandQueued("PROBE1:SETUP:ATT:MODE MAN"); //Allow/use manual attenuation setting with unknown probes
+	m_transport->SendCommandQueued("SYSTEM:KLOCK OFF"); //Don't lock front-panel
 	m_transport->SendCommandQueued("*WAI");
 
 	GetSampleDepth();
@@ -195,7 +208,12 @@ string RSRTO6Oscilloscope::GetDriverNameInternal()
 
 unsigned int RSRTO6Oscilloscope::GetInstrumentTypes()
 {
-	return Instrument::INST_OSCILLOSCOPE;
+	unsigned int resp = Instrument::INST_OSCILLOSCOPE;
+
+	if (m_hasAFG)
+		resp |= Instrument::INST_FUNCTION;
+
+	return resp;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -232,11 +250,21 @@ bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 			return m_channelsEnabled[i];
 	}
 
-	string reply = m_transport->SendCommandQueuedWithReply(
-						m_channels[i]->GetHwname() + ":STATE?");
+	bool resp;
+
+	if (IsAnalog(i))
+	{
+		resp = m_transport->SendCommandQueuedWithReply(
+							m_channels[i]->GetHwname() + ":STATE?") == "1";
+	}
+	else
+	{
+		resp = m_transport->SendCommandQueuedWithReply(
+							"DIG" + to_string(HWDigitalNumber(i)) + ":DISP?") == "ON";
+	}
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	m_channelsEnabled[i] = (reply == "1");
+	m_channelsEnabled[i] = resp;
 	return m_channelsEnabled[i];
 }
 
@@ -251,7 +279,9 @@ void RSRTO6Oscilloscope::EnableChannel(size_t i)
 		m_transport->SendCommandQueued("DIG" + to_string(HWDigitalNumber(i)) + ":DISP ON");
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	m_channelsEnabled[i] = true;
+	
+	if (IsAnalog(i))
+		m_channelsEnabled[i] = true; // Digital channel may fail to enable if pod not connected
 }
 
 void RSRTO6Oscilloscope::DisableChannel(size_t i)
@@ -796,6 +826,9 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 	for(size_t i=m_digitalChannelBase; i<(m_digitalChannelBase + m_digitalChannelCount); i++)
 	{
+		if(!IsChannelEnabled(i))
+			continue;
+
 		string hwname = "DIG" + to_string(HWDigitalNumber(i));
 
 		auto cap = new SparseDigitalWaveform;
@@ -1258,3 +1291,146 @@ void RSRTO6Oscilloscope::PushEdgeTrigger(EdgeTrigger* trig)
 
 	m_transport->SendCommandQueued(string("TRIGGER1:LEVEL") /*+ to_string(trig->GetInput(0).m_channel->GetIndex())*/ + " " + to_string(trig->GetLevel()));
 }
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Function generator
+
+//Channel info
+int RSRTO6Oscilloscope::GetFunctionChannelCount()
+{
+	if (!m_hasAFG)
+		LogFatal("Should not GetFunctionChannelCount() on a RTO6 w/o AFG\n");
+
+	return 2;
+}
+
+std::string RSRTO6Oscilloscope::GetFunctionChannelName(int chan)
+{
+	return "Gen" + to_string(chan + 1);
+}
+
+vector<FunctionGenerator::WaveShape> RSRTO6Oscilloscope::GetAvailableWaveformShapes(int /*chan*/)
+{
+	vector<WaveShape> res;
+	for (const auto& i : m_waveShapeNames)
+		res.push_back(i.second);
+
+	return res;
+}
+
+//Configuration
+bool RSRTO6Oscilloscope::GetFunctionChannelActive(int chan)
+{
+	return m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":ENABLE?") == "ON";
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelActive(int chan, bool on)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":ENABLE " + (on ? "ON" : "OFF"));
+}
+
+bool RSRTO6Oscilloscope::HasFunctionDutyCycleControls(int chan)
+{
+	return GetFunctionChannelShape(chan) == FunctionGenerator::SHAPE_SQUARE;
+}
+
+float RSRTO6Oscilloscope::GetFunctionChannelDutyCycle(int chan)
+{
+	return stof(m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":FUNC:SQUARE:DCYCLE?")) / 100.;
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelDutyCycle(int chan, float duty)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":FUNC:SQUARE:DCYCLE " + to_string(duty*100.));
+}
+
+float RSRTO6Oscilloscope::GetFunctionChannelAmplitude(int chan)
+{
+	return stof(m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":VOLTAGE?"));
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelAmplitude(int chan, float amplitude)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":VOLTAGE " + to_string(amplitude));
+}
+
+float RSRTO6Oscilloscope::GetFunctionChannelOffset(int chan)
+{
+	return stof(m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":VOLTAGE:OFFSET?"));
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelOffset(int chan, float offset)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":VOLTAGE:OFFSET " + to_string(offset));
+}
+
+float RSRTO6Oscilloscope::GetFunctionChannelFrequency(int chan)
+{
+	return stof(m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":FREQUENCY?"));
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelFrequency(int chan, float hz)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":FREQUENCY " + to_string(hz));
+}
+
+FunctionGenerator::WaveShape RSRTO6Oscilloscope::GetFunctionChannelShape(int chan)
+{
+	string reply = m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":FUNCTION?");
+
+	if (m_waveShapeNames.count(reply) == 0)
+	{
+		LogWarning("Unknown waveshape: %s\n", reply.c_str());
+		return FunctionGenerator::SHAPE_SINE;
+	}
+
+	return m_waveShapeNames.at(reply);
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelShape(int chan, FunctionGenerator::WaveShape shape)
+{
+	for (const auto& i : m_waveShapeNames)
+	{
+		if (i.second == shape)
+		{
+			m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":FUNCTION " + i.first);
+			return;
+		}
+	}
+
+	LogWarning("Unsupported WaveShape requested\n");
+}
+
+bool RSRTO6Oscilloscope::HasFunctionRiseFallTimeControls(int /*chan*/)
+{
+	return false;
+}
+
+FunctionGenerator::OutputImpedance RSRTO6Oscilloscope::GetFunctionChannelOutputImpedance(int chan)
+{
+	return (m_transport->SendCommandQueuedWithReply("WGEN" + to_string(chan + 1) +":OUTPUT?") == "FIFT") ? 
+			FunctionGenerator::IMPEDANCE_50_OHM : FunctionGenerator::IMPEDANCE_HIGH_Z;
+}
+
+void RSRTO6Oscilloscope::SetFunctionChannelOutputImpedance(int chan, FunctionGenerator::OutputImpedance z)
+{
+	m_transport->SendCommandQueued("WGEN" + to_string(chan + 1) +":OUTPUT " +
+		((z == FunctionGenerator::IMPEDANCE_50_OHM) ? "FIFTY" : "HIZ"));
+}
+
+const std::map<const std::string, const FunctionGenerator::WaveShape> RSRTO6Oscilloscope::m_waveShapeNames = {
+		{"SIN", FunctionGenerator::SHAPE_SINE},
+		{"SQU", FunctionGenerator::SHAPE_SQUARE},
+		{"RAMP", FunctionGenerator::SHAPE_TRIANGLE},
+		{"DC", FunctionGenerator::SHAPE_DC},
+		{"PULS", FunctionGenerator::SHAPE_PULSE},
+		{"SINC", FunctionGenerator::SHAPE_SINC},
+		{"CARD", FunctionGenerator::SHAPE_CARDIAC},
+		{"GAUS", FunctionGenerator::SHAPE_GAUSSIAN},
+		{"LORN", FunctionGenerator::SHAPE_LORENTZ},
+		{"EXPR", FunctionGenerator::SHAPE_EXPONENTIAL_RISE},
+		{"EXPF", FunctionGenerator::SHAPE_EXPONENTIAL_DECAY},
+
+		// {"", FunctionGenerator::SHAPE_ARB} // Not supported
+};
