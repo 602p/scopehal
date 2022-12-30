@@ -47,6 +47,7 @@ public:
 	virtual unsigned int GetInstrumentTypes();
 
 	virtual void FlushConfigCache();
+	virtual OscilloscopeChannel* GetExternalTrigger();
 
 	//Channel configuration
 	virtual bool IsChannelEnabled(size_t i);
@@ -62,10 +63,19 @@ public:
 	virtual std::vector<unsigned int> GetChannelBandwidthLimiters(size_t i);
 	virtual float GetChannelVoltageRange(size_t i, size_t stream);
 	virtual void SetChannelVoltageRange(size_t i, size_t stream, float range);
-	virtual OscilloscopeChannel* GetExternalTrigger();
 	virtual float GetChannelOffset(size_t i, size_t stream);
 	virtual void SetChannelOffset(size_t i, size_t stream, float offset);
 	virtual std::string GetProbeName(size_t i);
+
+	//Digital channel configuration
+	virtual std::vector<DigitalBank> GetDigitalBanks();
+	virtual DigitalBank GetDigitalBank(size_t channel);
+	virtual bool IsDigitalHysteresisConfigurable();
+	virtual bool IsDigitalThresholdConfigurable();
+	// virtual float GetDigitalHysteresis(size_t channel);
+	virtual float GetDigitalThreshold(size_t channel);
+	// virtual void SetDigitalHysteresis(size_t channel, float level);
+	virtual void SetDigitalThreshold(size_t channel, float level);
 
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger();
@@ -96,13 +106,21 @@ public:
 protected:
 	OscilloscopeChannel* m_extTrigChannel;
 
-	SCPISocketTransport* m_secondSocket;
-
 	//Mutexing for thread safety
 	std::recursive_mutex m_cacheMutex;
 
 	//hardware analog channel count, independent of LA option etc
 	unsigned int m_analogChannelCount;
+	unsigned int m_digitalChannelBase;
+	unsigned int m_digitalChannelCount;
+
+	bool IsAnalog(size_t index)
+	{ return index < m_analogChannelCount; }
+
+	int HWDigitalNumber(size_t index)
+	{ return index - m_digitalChannelBase; }
+
+	template <typename T> size_t AcquireHeader(T* cap, std::string chname);
 
 	//config cache
 	std::map<size_t, float> m_channelOffsets;
