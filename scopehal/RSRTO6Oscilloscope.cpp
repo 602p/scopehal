@@ -844,6 +844,8 @@ bool RSRTO6Oscilloscope::AcquireData()
 			}
 		}
 
+		delete[] samples;
+
 		//Free space reclaimed by deduplication
 		cap->Resize(k);
 		cap->m_offsets.shrink_to_fit();
