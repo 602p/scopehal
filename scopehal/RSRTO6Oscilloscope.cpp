@@ -260,7 +260,7 @@ bool RSRTO6Oscilloscope::IsChannelEnabled(size_t i)
 	else
 	{
 		resp = m_transport->SendCommandQueuedWithReply(
-							"DIG" + to_string(HWDigitalNumber(i)) + ":DISP?") == "ON";
+							"BUS1:PAR:BIT" + to_string(HWDigitalNumber(i)) + ":STATE?") == "1";
 	}
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -273,12 +273,14 @@ void RSRTO6Oscilloscope::EnableChannel(size_t i)
 	if(i == m_extTrigChannel->GetIndex())
 		return;
 
-	if (IsAnalog(i))
-		m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 1");
-	else
-		m_transport->SendCommandQueued("DIG" + to_string(HWDigitalNumber(i)) + ":DISP ON");
+	lock_guard<recursive_mutex> lock(m_mutex);
 
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	if (IsAnalog(i))
+		m_transport->SendCommandImmediate(m_channels[i]->GetHwname() + ":STATE 1; *WAI");
+	else
+		m_transport->SendCommandImmediate("BUS1:PAR:BIT" + to_string(HWDigitalNumber(i)) + ":STATE 1; *WAI");
+
+	lock_guard<recursive_mutex> lock2(m_cacheMutex);
 	
 	if (IsAnalog(i))
 		m_channelsEnabled[i] = true; // Digital channel may fail to enable if pod not connected
@@ -289,12 +291,14 @@ void RSRTO6Oscilloscope::DisableChannel(size_t i)
 	if(i == m_extTrigChannel->GetIndex())
 		return;
 
-	if (IsAnalog(i))
-		m_transport->SendCommandQueued(m_channels[i]->GetHwname() + ":STATE 0");
-	else
-		m_transport->SendCommandQueued("DIG" + to_string(HWDigitalNumber(i)) + ":DISP OFF");
+	lock_guard<recursive_mutex> lock(m_mutex);
 
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	if (IsAnalog(i))
+		m_transport->SendCommandImmediate(m_channels[i]->GetHwname() + ":STATE 0; *WAI");
+	else
+		m_transport->SendCommandImmediate("BUS1:PAR:BIT" + to_string(HWDigitalNumber(i)) + ":STATE 0; *WAI");
+
+	lock_guard<recursive_mutex> lock2(m_cacheMutex);
 	m_channelsEnabled[i] = false;
 }
 
@@ -744,6 +748,8 @@ bool RSRTO6Oscilloscope::AcquireData()
 		if(!IsChannelEnabled(i))
 			continue;
 
+		LogDebug("Starting acquisition phase for ch%ld\n", i);
+
 		auto cap = new UniformAnalogWaveform;
 		size_t length = AcquireHeader(cap, m_channels[i]->GetHwname());
 
@@ -765,9 +771,9 @@ bool RSRTO6Oscilloscope::AcquireData()
 			#endif
 		;
 
-		LogDebug("Starting acquisition phase for ch%ld. length = %lu\n", i, length);
-
 		unsigned char* dest_buf = (unsigned char*)cap->m_samples.GetCpuPointer();
+
+		LogDebug(" - Begin transfer of %lu bytes\n", length);
 
 		while (transferred != length)
 		{
@@ -824,12 +830,26 @@ bool RSRTO6Oscilloscope::AcquireData()
 		pending_waveforms[i].push_back(cap);
 	}
 
+	bool didAcquireAnyDigitalChannels = false;
+
 	for(size_t i=m_digitalChannelBase; i<(m_digitalChannelBase + m_digitalChannelCount); i++)
 	{
 		if(!IsChannelEnabled(i))
 			continue;
 
+		if (!didAcquireAnyDigitalChannels)
+		{
+			while (m_transport->SendCommandImmediateWithReply("FORM?") != "ASC,0")
+			{
+				m_transport->SendCommandImmediate("FORM ASC; *WAI"); //Only possible to get data out in ASCII format
+				usleep(1000000);
+			}
+			didAcquireAnyDigitalChannels = true;
+		}
+
 		string hwname = "DIG" + to_string(HWDigitalNumber(i));
+
+		LogDebug("Starting acquisition for dig%d\n", HWDigitalNumber(i));
 
 		auto cap = new SparseDigitalWaveform;
 		size_t length = AcquireHeader(cap, hwname);
@@ -841,12 +861,34 @@ bool RSRTO6Oscilloscope::AcquireData()
 			continue;
 		}
 
-		LogDebug("Starting acquisition for dig%d\n", HWDigitalNumber(i));
+		size_t expected_bytes = length * 2; // Commas between items + newline
 
 		// Digital channels do not appear to support selecting a subset, so no 'chunking'
 
-		size_t len_bytes;
-		unsigned char* samples = (unsigned char*)m_transport->SendCommandImmediateWithRawBlockReply(hwname + ":DATA?; *WAI", len_bytes);
+		LogDebug(" - Begin transfer of %lu bytes (*2)\n", length);
+
+		// Since it's ascii the scope just sends it as a SCPI 'line' without the size block
+		m_transport->SendCommandImmediate(hwname + ":DATA?; *WAI");
+		unsigned char* samples = new unsigned char[expected_bytes];
+		size_t read_bytes = m_transport->ReadRawData(expected_bytes, samples);
+
+		if (read_bytes != expected_bytes)
+		{
+			LogWarning("Unexpected number of bytes back; aborting acquisiton\n");
+			usleep(100000);
+			m_transport->FlushRXBuffer();
+
+			delete cap;
+
+			for (auto* c : pending_waveforms[i])
+			{
+				delete c;
+			}
+
+			delete[] samples;
+
+			return false;
+		}
 
 		bool last = samples[0] == '1';
 
@@ -858,7 +900,7 @@ bool RSRTO6Oscilloscope::AcquireData()
 
 		for(size_t m=1; m<length; m++)
 		{
-			bool sample = samples[m] == '1';
+			bool sample = samples[m*2] == '1';
 
 			//Deduplicate consecutive samples with same value
 			//FIXME: temporary workaround for rendering bugs
@@ -877,8 +919,6 @@ bool RSRTO6Oscilloscope::AcquireData()
 			}
 		}
 
-		delete[] samples;
-
 		//Free space reclaimed by deduplication
 		cap->Resize(k);
 		cap->m_offsets.shrink_to_fit();
@@ -888,9 +928,14 @@ bool RSRTO6Oscilloscope::AcquireData()
 		cap->MarkSamplesModifiedFromCpu();
 		cap->MarkTimestampsModifiedFromCpu();
 
+		delete[] samples;
+
 		//Done, update the data
 		pending_waveforms[i].push_back(cap);
 	}
+
+	if (didAcquireAnyDigitalChannels)
+		m_transport->SendCommandImmediate("FORMat:DATA REAL,32"); //Return to f32
 
 	if (any_data)
 	{
@@ -1169,7 +1214,7 @@ int64_t RSRTO6Oscilloscope::GetTriggerOffset()
 {
 	if(m_triggerOffsetValid)
 	{
-		LogDebug("GetTriggerOffset() queried and returned cached value %ld\n", m_triggerOffset);
+		// LogDebug("GetTriggerOffset() queried and returned cached value %ld\n", m_triggerOffset);
 		return m_triggerOffset;
 	}
 
