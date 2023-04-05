@@ -45,6 +45,7 @@
 #include "ADL5205Decoder.h"
 #include "AreaMeasurement.h"
 #include "AutocorrelationFilter.h"
+#include "AverageFilter.h"
 #include "BaseMeasurement.h"
 #include "BINImportFilter.h"
 #include "BurstWidthMeasurement.h"

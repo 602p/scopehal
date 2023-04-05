@@ -8,6 +8,7 @@ set(SCOPEPROTOCOLS_SOURCES
 	ADL5205Decoder.cpp
 	AreaMeasurement.cpp
 	AutocorrelationFilter.cpp
+	AverageFilter.cpp
 	BaseMeasurement.cpp
 	BINImportFilter.cpp
 	BurstWidthMeasurement.cpp
